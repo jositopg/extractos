@@ -14,4 +14,3 @@ export/*
 *.sqlite-*
 *.sqlite-journal
 .env*
-api/despacho.js

@@ -13,7 +13,7 @@ No es Open Banking. No sincroniza el banco. No confundir con `gestion-financiera
 - No insertar en Finca un apunte que Jose no haya dejado en destino `finca` con propiedad y categoría. Una propiedad `local-*` no existe en Finca: se guarda aquí y se deja `finca_error`.
 - No llamar a Postgres, Blob ni a la web de producción desde los tests. El escritor de Finca se inyecta. `crearServicio(db, rutas, { finca })`. Sin escritor, o con `finca: false`, no hay escritura.
 - No arrancar `npm run dev` ni `npm run import` contra un `inbox/` real para probar. Al leer la bandeja se sincroniza Finca.
-- El repo es `jositopg/extractos`, público, como Finca y Fuck You Money. Tras un cambio pedido, commit y `git push` a `main`. Vercel despliega producción desde esa rama. No hagas force-push. No subas `.env*`, el sqlite, `inbox/`, `export/` ni `api/despacho.js`.
+- El repo es `jositopg/extractos`, público, como Finca y Fuck You Money. Tras un cambio pedido, commit y `git push` a `main`. Vercel despliega producción desde esa rama. No hagas force-push. No subas `.env*`, el sqlite, `inbox/` ni `export/`. `api/despacho.js` sí se sube: es la función que Vercel tiene que ver al clonar.
 - No leer, imprimir ni copiar al repo `~/.finca-db.env`, `~/.fuckyoumoney-db.env`, `.env.local` ni `EXTRACTOS_PASSWORD`. Los errores pasan por `mensajeError`, que tapa las URLs `postgresql://`.
 - No meter `FINCA_DATABASE_URL` y `FYM_DATABASE_URL` en el mismo `process.env` de un shell local.
 - No guardar el libro en la base de Finca ni en la de Fuck You Money. No crees un Supabase para esta app: el duplicado lo resuelve la identidad del apunte, no otra base. El libro sigue en el Blob privado.
@@ -23,7 +23,7 @@ No es Open Banking. No sincroniza el banco. No confundir con `gestion-financiera
 - `shared/` es puro: céntimos, parseo, reglas, informes. Sin Node.
 - `server/` es el libro SQLite, la API y la escritura en Finca. `server/index.ts` escucha en local y vigila `inbox/`. No lo importe el handler de Vercel.
 - `server/despachar.ts` reparte las rutas. Lo usan el servidor local y la nube.
-- `server/nube.ts` es el handler de Vercel. `npm run build` lo empaqueta a `api/despacho.js` y ese fichero no entra en git. No lo edites a mano.
+- `server/nube.ts` es el handler de Vercel. `npm run build` lo empaqueta a `api/despacho.js`. Ese fichero entra en git y no se edita a mano.
 - `src/` es la interfaz. Vite en el puerto 5173 hace proxy de `/api` a `127.0.0.1:8787`.
 - El libro local es `data/extractos.sqlite`. `inbox/` y `export/` no entran en git.
 
@@ -77,7 +77,7 @@ El libro de la web es un Blob privado, `libro/extractos.sqlite`, almacén `extra
 
 La carpeta `/tmp` de la función no sobrevive a la siguiente petición. Un extracto leído y todavía sin cuenta guarda sus bytes en la tabla `ficheros`, dentro del mismo sqlite. Al crear o corregir la cuenta, si el IBAN o el CCC encajan, esos apuntes se enganchan y los bytes se borran. Si el extracto ya tenía cuenta, no se guardan los bytes. Un extracto subido antes de esto no tiene bytes: hay que volver a elegirlo. Lo que ya esté en el libro no se duplica.
 
-En el plan Hobby solo cabe una función. `scripts/bundle-api.mjs` escribe `api/despacho.js` durante el build y ese fichero no está en git. `vercel.json` no lo lista en `functions`: al clonar, Vercel exige que ese patrón ya exista y el deploy desde GitHub fallaría. La duración de 60 s va en `export const maxDuration` de `server/nube.ts`. `vercel.json` reescribe `/api/:path*` hacia esa función con la ruta real en `__ruta`, y `urlDe` la reconstruye. No añadas más ficheros en `api/`: cada uno cuenta como función y el tope es 12. Un catch-all `api/[...path].js` en Vercel solo casa un tramo, así que `/api/archivos/:id` no llega y el navegador ve «The page could not be found». esbuild deja `pg` y `@vercel/blob` como imports externos para que Vercel los tracee. `node:sqlite` se queda como builtin. Node de la función: 24.x.
+En el plan Hobby solo cabe una función. `scripts/bundle-api.mjs` escribe `api/despacho.js`. Ese fichero entra en git: al clonar, Vercel tiene que verlo, y si falta el deploy desde GitHub publica la web sin API. `npm run build` lo regenera. Si cambias `server/`, el commit lleva el js nuevo. No lo edites a mano. `vercel.json` le pone `maxDuration` 60 y reescribe `/api/:path*` hacia esa función con la ruta real en `__ruta`, y `urlDe` la reconstruye. No añadas más ficheros en `api/`: cada uno cuenta como función y el tope es 12. Un catch-all `api/[...path].js` en Vercel solo casa un tramo, así que `/api/archivos/:id` no llega y el navegador ve «The page could not be found». esbuild deja `pg` y `@vercel/blob` como imports externos para que Vercel los tracee. `node:sqlite` se queda como builtin. Node de la función: 24.x.
 
 `resumen.nube` es true en Vercel. La interfaz esconde la carpeta inbox y «Leer inbox», y pide el fichero. El tope de subida local es 20 MB. En el plan Hobby de Vercel el cuerpo de la función se queda cerca de 4,5 MB.
 
