@@ -33,6 +33,8 @@ export function fincaUrlsToTry(raw: string): string[] {
       ]) {
         urls.push(`postgresql://${user}:${pass}@${host}:5432/postgres`)
       }
+      // Fuck You Money está en eu-central-1, clúster aws-1. El de sesión no entra; el de transacción sí.
+      urls.push(`postgresql://${user}:${pass}@aws-1-eu-central-1.pooler.supabase.com:6543/postgres`)
     }
   } catch {
     return [direct]

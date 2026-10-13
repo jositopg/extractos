@@ -1092,6 +1092,7 @@ function fincaUrlsToTry(raw) {
       ]) {
         urls.push(`postgresql://${user}:${pass}@${host}:5432/postgres`);
       }
+      urls.push(`postgresql://${user}:${pass}@aws-1-eu-central-1.pooler.supabase.com:6543/postgres`);
     }
   } catch {
     return [direct];
