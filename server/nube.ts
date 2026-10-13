@@ -9,6 +9,8 @@ import { urlDe } from './ruta'
 import { claveConfigurada, leerCookie, sesionValida } from './sesion'
 import { crearServicio } from './servicio'
 
+export const maxDuration = 60
+
 const rutas = {
   root: '/tmp/extractos',
   inbox: join('/tmp/extractos', 'inbox'),
