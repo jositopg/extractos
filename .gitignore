@@ -1,0 +1,17 @@
+node_modules
+dist
+.DS_Store
+*.local
+.vercel
+
+data/*
+!data/.gitkeep
+inbox/*
+!inbox/.gitkeep
+export/*
+!export/.gitkeep
+*.sqlite
+*.sqlite-*
+*.sqlite-journal
+.env*
+api/despacho.js

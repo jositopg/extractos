@@ -1,0 +1,102 @@
+:root {
+  color: #1c1915;
+  background: #f3efe6;
+  font-family: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+  font-size: 17px;
+  line-height: 1.45;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; }
+
+button, input, select {
+  font: inherit;
+  color: inherit;
+}
+
+button, select, input[type="month"], input[type="text"], input[type="file"] {
+  background: #fffdf8;
+  border: 1px solid #d9d0c3;
+  border-radius: 6px;
+  padding: 0.35rem 0.55rem;
+}
+
+button {
+  cursor: pointer;
+  background: #1f4d3a;
+  color: #f7f3ea;
+  border-color: #1f4d3a;
+}
+
+button.sec {
+  background: #fffdf8;
+  color: #1c1915;
+  border-color: #d9d0c3;
+}
+
+button:disabled { opacity: 0.55; cursor: default; }
+
+.app { max-width: 980px; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
+
+header h1 { margin: 0; font-size: 2rem; font-weight: 600; letter-spacing: -0.03em; }
+header p { margin: 0.3rem 0 0; color: #6b645c; max-width: 40rem; }
+
+.tabs { display: flex; gap: 0.4rem; margin: 1.2rem 0; flex-wrap: wrap; }
+.tabs button { background: transparent; color: #1c1915; border-color: transparent; }
+.tabs button.on { background: #1c1915; color: #f7f3ea; }
+
+.panel {
+  background: #fffdf8;
+  border: 1px solid #e4ddd2;
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+}
+
+.aviso, .error {
+  background: #fff6e8;
+  border: 1px solid #ead7b2;
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  margin: 0 0 1rem;
+}
+
+.error { background: #fde8e2; border-color: #f0c2b4; }
+
+.fila, .cuenta, .mov { border-bottom: 1px solid #eee6da; padding: 0.85rem 0; }
+.fila:last-child, .cuenta:last-child, .mov:last-child { border-bottom: 0; }
+
+.mov-top, .cuenta, .entre {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.concepto { font-weight: 600; }
+.meta { color: #6b645c; font-size: 0.92rem; }
+.importe { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.entra { color: #1f6b45; }
+.sale { color: #9a3412; }
+
+.controles, .form, .acciones { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.55rem; align-items: center; }
+.controles select, .controles input[type="text"], .form input[type="text"] { min-width: 10rem; }
+
+.numeros { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.7rem; margin-bottom: 1rem; }
+.numeros div { background: #f7f3ea; border-radius: 8px; padding: 0.7rem 0.8rem; }
+.numeros strong { display: block; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+.numeros span { color: #6b645c; font-size: 0.85rem; }
+
+pre {
+  white-space: pre-wrap;
+  background: #f7f3ea;
+  border-radius: 8px;
+  padding: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+}
+
+label.check { display: flex; gap: 0.35rem; align-items: center; color: #6b645c; }
+
+h2 { font-size: 1.15rem; margin: 0 0 0.6rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86em; }

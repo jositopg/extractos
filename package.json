@@ -1,0 +1,39 @@
+{
+  "name": "extractos",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Libro de extractos bancarios. Concilia propiedades en Finca y sigue saldos para Fuck You Money.",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' concurrently -k -n api,web -c green,blue \"tsx watch server/index.ts\" \"vite\"",
+    "start": "NODE_ENV=production NODE_OPTIONS='--disable-warning=ExperimentalWarning' tsx server/index.ts",
+    "build": "vite build && node scripts/bundle-api.mjs",
+    "test": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' vitest run",
+    "check": "tsc --noEmit",
+    "import": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' tsx server/cli.ts"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.8.1",
+    "pg": "^8.23.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "unpdf": "^1.8.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^4.1.11"
+  }
+}
