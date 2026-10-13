@@ -12,7 +12,7 @@ No es Open Banking. No sincroniza el banco. No confundir con `gestion-financiera
 - No borrar en Finca filas que este libro no haya creado. El borrado es `DELETE FROM transacciones WHERE id = $1 AND referencia = $2`, con `referencia = extractos:${movimientoId}`.
 - No insertar en Finca un apunte que Jose no haya dejado en destino `finca` con propiedad y categoría. Una propiedad `local-*` no existe en Finca: se guarda aquí y se deja `finca_error`.
 - No llamar a Postgres, Blob ni a la web de producción desde los tests. El escritor de Finca se inyecta. `crearServicio(db, rutas, { finca })`. Sin escritor, o con `finca: false`, no hay escritura.
-- No arrancar `npm run dev` ni `npm run import` contra un `inbox/` real para probar. Al leer la bandeja se sincroniza Finca.
+- No arrancar `npm run dev` ni `npm run import` contra un `inbox/` real para probar. Al leer la carpeta se sincroniza Finca.
 - El repo es `jositopg/extractos`, público, como Finca y Fuck You Money. Tras un cambio pedido, commit y `git push` a `main`. Vercel despliega producción desde esa rama. No hagas force-push. No subas `.env*`, el sqlite, `inbox/` ni `export/`. `api/despacho.js` sí se sube: es la función que Vercel tiene que ver al clonar.
 - No leer, imprimir ni copiar al repo `~/.finca-db.env`, `~/.fuckyoumoney-db.env`, `.env.local` ni `EXTRACTOS_PASSWORD`. Los errores pasan por `mensajeError`, que tapa las URLs `postgresql://`.
 - No meter `FINCA_DATABASE_URL` y `FYM_DATABASE_URL` en el mismo `process.env` de un shell local.
@@ -65,7 +65,7 @@ Se sincroniza después de importar, subir, clasificar y asignar. Borrar un extra
 
 Si falta `~/.finca-db.env` y no hay variable de entorno, se clasifica en local y se informa el error. El import no falla entero.
 
-El catálogo de propiedades es `SELECT id, nombre FROM propiedades`. El de Fuck You Money es `SELECT id, name, manual_value FROM assets WHERE type = 'cash'`.
+El catálogo de propiedades es `SELECT id, nombre FROM propiedades`. El de Fuck You Money es `SELECT id, name, manual_value, institution FROM assets WHERE type = 'cash'`, por el mismo host directo y los mismos tres poolers que Finca. Entran `corriente`, `ahorro`, `remunerada` y `nomina`, y el efectivo sin tipo: el formulario de Fuck You Money no guarda el tipo. `otro` no entra. Cada fila se asegura como cuenta local: si ya hay `fym_asset_id`, se actualiza el nombre y no se toca el IBAN ni `en_fym`; si no, se crea con el id del activo y `en_fym` marcado. No se borran cuentas locales. `resumen()` no sincroniza. La web llama a `POST /api/catalogos` una vez al abrir. Si el host no resuelve, el aviso dice que el proyecto puede estar pausado. No se escribe en Fuck You Money.
 
 ## Web
 
@@ -87,9 +87,9 @@ En el plan Hobby solo cabe una función. `scripts/bundle-api.mjs` escribe `api/d
 
 ## Al tocar la interfaz
 
-CSS propio, sin Tailwind. Comprueba el flujo en el navegador si el cambio se ve: entrar, subir, bandeja, cuentas, registro y la pestaña Finca. Un pantallazo no basta. Si no hay navegador, dilo.
+CSS propio, sin Tailwind. Comprueba el flujo en el navegador si el cambio se ve: entrar, subir, apuntes, cuentas, registro y la pestaña Finca. Un pantallazo no basta. Si no hay navegador, dilo.
 
-La pestaña se llama Finca. Conciliar guarda la regla y escribe. «Solo este apunte» no crea regla. «Es un traspaso» y «No es de una propiedad» sacan el cargo del bruto.
+La pestaña de los movimientos se llama Apuntes. El filtro inicial es Pendiente. Al asignar un extracto suelto, la pantalla cambia a esa pestaña. Conciliar guarda la regla y escribe. «Solo este apunte» no crea regla. «Es un traspaso» y «No es de una propiedad» sacan el cargo del bruto. La otra pestaña se llama Finca.
 
 ## Al cambiar el diseño
 

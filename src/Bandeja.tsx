@@ -24,8 +24,22 @@ export function Bandeja({ resumen, onChange }: { resumen: ResumenJson; onChange:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destino, resumen.recuento.pendiente, resumen.recuento.clasificado])
 
+  const sinCuenta = resumen.archivos.some((a) => !a.cuentaId && !a.error && a.guardado)
+  const sinGuardar = resumen.archivos.some((a) => !a.cuentaId && !a.error && !a.guardado)
+  const vacio =
+    sinGuardar && sinCuenta
+      ? 'Hay un extracto sin guardar y otro sin cuenta. Vuelve a elegir el que no quedó, y asigna el otro arriba. Los apuntes para puntear salen aquí.'
+      : sinGuardar
+        ? 'Ese extracto no quedó guardado. Vuelve a elegirlo arriba. Lo que ya esté en el libro no se duplica. Los apuntes para puntear salen aquí.'
+        : sinCuenta
+          ? 'El extracto todavía no tiene cuenta. Elígelo arriba, en el aviso. Los apuntes para puntear salen aquí.'
+          : destino === 'pendiente'
+            ? 'No hay apuntes pendientes. Si ya los clasificaste, cambia el filtro.'
+            : 'No hay apuntes en esta vista.'
+
   return (
     <section className="panel">
+      <p className="meta">Los apuntes del extracto se puntean aquí.</p>
       <div className="controles">
         <select value={destino} onChange={(e) => setDestino(e.target.value)}>
           {DESTINOS.map((d) => (
@@ -39,7 +53,7 @@ export function Bandeja({ resumen, onChange }: { resumen: ResumenJson; onChange:
         </button>
       </div>
       {error && <p className="error">{error}</p>}
-      {movs.length === 0 && <p className="meta">No hay movimientos en esta vista.</p>}
+      {movs.length === 0 && <p className="meta">{vacio}</p>}
       {movs.map((m) => (
         <Fila key={`${m.id}-${m.destino}-${m.categoriaFinca}-${m.propiedadId}-${m.fincaSincronizadoEn ?? ''}-${m.fincaError ?? ''}`} mov={m} resumen={resumen} onSaved={async () => { await onChange(); await cargar() }} />
       ))}

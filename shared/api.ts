@@ -164,4 +164,5 @@ export type CatalogoJson = {
   propiedades: number | null
   fymCuentas: number | null
   errores: string[]
+  avisos: string[]
 }

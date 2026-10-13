@@ -2,8 +2,9 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Client } from 'pg'
 import type { CatalogoJson } from '../shared/api'
+import { esCuentaBancaria } from '../shared/categorias'
 import { centimosDesdeTexto } from '../shared/money'
-import { reemplazarFym, reemplazarPropiedadesFinca, type Db } from './db'
+import { asegurarCuentasDesdeFym, reemplazarFym, reemplazarPropiedadesFinca, type Db } from './db'
 import { mensajeError } from './http'
 import { fincaUrlsToTry, urlAplicacion } from './pgurl'
 
@@ -38,8 +39,17 @@ async function consultar(urls: string[], sql: string): Promise<Array<Record<stri
   throw new Error(last)
 }
 
+function errorFym(err: unknown): string {
+  const msg = mensajeError(err)
+  if (/ENOTFOUND|NXDOMAIN|tenant\/user|getaddrinfo/i.test(msg)) {
+    return 'Fuck You Money no responde. Si el proyecto está pausado en Supabase, reanúdalo y vuelve a abrir Extractos.'
+  }
+  return `Fuck You Money: ${msg}`
+}
+
 export async function sincronizarCatalogos(db: Db): Promise<CatalogoJson> {
   const errores: string[] = []
+  const avisos: string[] = []
   let propiedades: number | null = null
   let fymCuentas: number | null = null
   const ahora = new Date().toISOString()
@@ -71,23 +81,46 @@ export async function sincronizarCatalogos(db: Db): Promise<CatalogoJson> {
   } else {
     try {
       const rows = await consultar(
-        [fymUrl],
-        `SELECT id, name, manual_value FROM assets WHERE type = 'cash' ORDER BY name`,
+        fincaUrlsToTry(fymUrl),
+        `SELECT id, name, manual_value, institution FROM assets WHERE type = 'cash' ORDER BY name`,
       )
+      const bancarias: Array<{ id: string; nombre: string; tipo: string; valor_centimos: number | null }> = []
+      let fuera = 0
+      for (const row of rows) {
+        const tipo = row.institution == null ? '' : String(row.institution).trim()
+        if (tipo && !esCuentaBancaria(tipo)) {
+          fuera += 1
+          continue
+        }
+        const id = String(row.id ?? '').trim()
+        const nombre = String(row.name ?? '').trim()
+        if (!id || !nombre) continue
+        bancarias.push({ id, nombre, tipo, valor_centimos: centimosPg(row.manual_value) })
+      }
       reemplazarFym(
         db,
-        rows.map((r) => ({
-          id: String(r.id),
-          nombre: String(r.name),
-          valor_centimos: centimosPg(r.manual_value),
+        bancarias.map((row) => ({
+          id: row.id,
+          nombre: row.nombre,
+          valor_centimos: row.valor_centimos,
+          tipo: row.tipo,
           visto_en: ahora,
         })),
       )
-      fymCuentas = rows.length
+      asegurarCuentasDesdeFym(db, bancarias, ahora)
+      fymCuentas = bancarias.length
+      if (fuera > 0) {
+        avisos.push(
+          fuera === 1
+            ? 'He dejado fuera 1 saldo que no es una cuenta bancaria.'
+            : `He dejado fuera ${fuera} saldos que no son cuenta bancaria.`,
+        )
+      }
+      if (bancarias.length === 0) avisos.push('Fuck You Money no ha devuelto cuentas bancarias.')
     } catch (err) {
-      errores.push(`Fuck You Money: ${mensajeError(err)}`)
+      errores.push(errorFym(err))
     }
   }
 
-  return { propiedades, fymCuentas, errores }
+  return { propiedades, fymCuentas, errores, avisos }
 }

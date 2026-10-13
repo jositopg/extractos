@@ -40,9 +40,11 @@ export function Cuentas({ resumen, onChange }: { resumen: ResumenJson; onChange:
       const r = await api<CatalogoJson>('/api/catalogos', { method: 'POST' })
       const partes = [
         r.propiedades != null ? `${r.propiedades} propiedades de Finca` : null,
-        r.fymCuentas != null ? `${r.fymCuentas} cuentas de Fuck You Money` : null,
+        r.fymCuentas != null ? `${r.fymCuentas} cuentas bancarias de Fuck You Money` : null,
+        ...r.avisos,
       ].filter(Boolean)
-      setMensaje([partes.join('. '), ...r.errores].filter(Boolean).join(' '))
+      setMensaje(partes.join('. '))
+      if (r.errores.length) setError(r.errores.join(' '))
       await onChange()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No he podido conectar')
@@ -53,12 +55,14 @@ export function Cuentas({ resumen, onChange }: { resumen: ResumenJson; onChange:
     <section className="panel">
       <div className="acciones">
         <button type="button" onClick={() => void catalogos()}>Traer propiedades y cuentas</button>
-        <span className="meta">Lee Finca y los saldos declarados en Fuck You Money. No cambia Fuck You Money.</span>
+        <span className="meta">Lee Finca y las cuentas bancarias de Fuck You Money. No cambia Fuck You Money. Al abrir Extractos ya se traen solas.</span>
       </div>
       {mensaje && <p className="meta">{mensaje}</p>}
       {error && <p className="error">{error}</p>}
 
-      {resumen.cuentas.length === 0 && <p>Todavía no hay cuentas. Crea una por cada cuenta bancaria.</p>}
+      {resumen.cuentas.length === 0 && (
+        <p>Todavía no hay cuentas. Las bancarias de Fuck You Money aparecen solas al traer el catálogo.</p>
+      )}
       {resumen.cuentas.map((c) => (
         <article key={c.id} className="cuenta">
           <div>
@@ -116,7 +120,8 @@ export function Cuentas({ resumen, onChange }: { resumen: ResumenJson; onChange:
         </article>
       ))}
 
-      <h2 style={{ marginTop: '1.4rem' }}>Nueva cuenta</h2>
+      <h2 style={{ marginTop: '1.4rem' }}>Cuenta que no está en Fuck You Money</h2>
+      <p className="meta">El extracto se asigna a una cuenta que ya viene de allí. Esta ficha es solo si falta.</p>
       <form className="form" onSubmit={(e) => void crear(e)}>
         <input value={nombre} onChange={(e) => setNombre(e.target.value)} placeholder="Nombre" required />
         <input value={banco} onChange={(e) => setBanco(e.target.value)} placeholder="Banco" />

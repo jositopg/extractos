@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { ImportacionJson, ResumenJson } from '../shared/api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CatalogoJson, ImportacionJson, ResumenJson } from '../shared/api'
 import { ACCEPT_FICHEROS } from '../shared/formatos'
 import { api, esSesion } from './api'
 import { Bandeja } from './Bandeja'
@@ -7,16 +7,17 @@ import { Cuentas } from './Cuentas'
 import { Finca } from './Exportar'
 import { Registro } from './Registro'
 
-type Tab = 'bandeja' | 'cuentas' | 'registro' | 'finca'
+type Tab = 'apuntes' | 'cuentas' | 'registro' | 'finca'
 
 export function App() {
-  const [tab, setTab] = useState<Tab>('bandeja')
+  const [tab, setTab] = useState<Tab>('apuntes')
   const [resumen, setResumen] = useState<ResumenJson | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [leyendo, setLeyendo] = useState(false)
   const [pedirClave, setPedirClave] = useState(false)
   const [clave, setClave] = useState('')
   const [notas, setNotas] = useState<string[]>([])
+  const catalogoPedido = useRef(false)
 
   const fallar = useCallback((err: unknown, reserva: string) => {
     if (esSesion(err)) {
@@ -40,6 +41,18 @@ export function App() {
   useEffect(() => {
     void cargar()
   }, [cargar])
+
+  useEffect(() => {
+    if (!resumen || pedirClave || catalogoPedido.current) return
+    catalogoPedido.current = true
+    void api<CatalogoJson>('/api/catalogos', { method: 'POST' })
+      .then(async (r) => {
+        const textos = [...r.errores, ...r.avisos]
+        if (textos.length) setNotas((prev) => [...textos, ...prev])
+        await cargar()
+      })
+      .catch((err) => fallar(err, 'No he podido traer las cuentas de Fuck You Money'))
+  }, [resumen, pedirClave, cargar, fallar])
 
   function textosDe(resultado: ImportacionJson): string[] {
     return [...resultado.notas, ...resultado.errores.map((item) => `${item.nombre}: ${item.error}`)]
@@ -117,8 +130,8 @@ export function App() {
         <h1>Extractos</h1>
         <p>
           {enLaWeb
-            ? 'Elige el extracto. El saldo queda aquí. Si un apunte es de un piso, lo concilias y se escribe en Finca. Las cuentas que marques sirven de saldo para Fuck You Money, sin cambiar esa app.'
-            : 'Deja los extractos en la carpeta inbox o elígelos aquí. El saldo queda en este libro. Si un apunte es de un piso, lo concilias y se escribe en Finca.'}
+            ? 'Elige el extracto y asígnalo a una cuenta de Fuck You Money. Los apuntes se puntean en Apuntes: si son de un piso, se escriben en Finca. El saldo queda aquí, sin cambiar Fuck You Money.'
+            : 'Deja los extractos en la carpeta inbox o elígelos aquí. Asígnale una cuenta de Fuck You Money y puntea los apuntes en Apuntes. Si son de un piso, se escriben en Finca.'}
         </p>
       </header>
 
@@ -164,7 +177,9 @@ export function App() {
                   {a.error ||
                     a.avisos ||
                     (a.guardado
-                      ? `${a.leidos} apuntes leídos. Crea la cuenta con el IBAN y se enganchan solos, o asígnala aquí.`
+                      ? resumen.cuentas.length
+                        ? `${a.leidos} apuntes leídos. Elige la cuenta. Luego se puntean en Apuntes.`
+                        : `${a.leidos} apuntes leídos. Aún no hay cuentas bancarias de Fuck You Money.`
                       : `${a.leidos} apuntes leídos, pero el fichero no quedó guardado. Vuelve a elegirlo. Lo que ya esté en el libro no se duplica.`)}
                 </div>
               </div>
@@ -173,16 +188,21 @@ export function App() {
                   <select
                     defaultValue=""
                     onChange={(e) => {
-                      if (!e.target.value) return
+                      const cuentaId = e.target.value
+                      if (!cuentaId) return
                       void api(`/api/archivos/${a.id}/cuenta`, {
                         method: 'POST',
-                        body: JSON.stringify({ cuentaId: e.target.value }),
+                        body: JSON.stringify({ cuentaId }),
                       })
-                        .then(cargar)
+                        .then(async () => {
+                          setTab('apuntes')
+                          setNotas((prev) => ['Extracto asignado. Los apuntes están en Apuntes para puntearlos.', ...prev])
+                          await cargar()
+                        })
                         .catch((err) => fallar(err, 'No he podido asignar la cuenta'))
                     }}
                   >
-                    <option value="">Asignar cuenta</option>
+                    <option value="">Asignar a una cuenta</option>
                     {resumen.cuentas.map((c) => (
                       <option key={c.id} value={c.id}>{c.nombre}</option>
                     ))}
@@ -206,15 +226,15 @@ export function App() {
       )}
 
       <nav className="tabs">
-        <button type="button" className={tab === 'bandeja' ? 'on' : ''} onClick={() => setTab('bandeja')}>
-          Bandeja{resumen ? ` (${resumen.recuento.pendiente})` : ''}
+        <button type="button" className={tab === 'apuntes' ? 'on' : ''} onClick={() => setTab('apuntes')}>
+          Apuntes{resumen ? ` (${resumen.recuento.pendiente})` : ''}
         </button>
         <button type="button" className={tab === 'cuentas' ? 'on' : ''} onClick={() => setTab('cuentas')}>Cuentas</button>
         <button type="button" className={tab === 'registro' ? 'on' : ''} onClick={() => setTab('registro')}>Registro</button>
         <button type="button" className={tab === 'finca' ? 'on' : ''} onClick={() => setTab('finca')}>Finca</button>
       </nav>
 
-      {resumen && tab === 'bandeja' && <Bandeja resumen={resumen} onChange={cargar} />}
+      {resumen && tab === 'apuntes' && <Bandeja resumen={resumen} onChange={cargar} />}
       {resumen && tab === 'cuentas' && <Cuentas resumen={resumen} onChange={cargar} />}
       {resumen && tab === 'registro' && <Registro cuentas={resumen.cuentas} />}
       {resumen && tab === 'finca' && <Finca />}

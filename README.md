@@ -18,12 +18,12 @@ npm run dev
 
 Abre http://127.0.0.1:5173
 
-La misma interfaz está en https://extractos-wine.vercel.app. Allí no hay carpeta inbox: se elige el fichero en el navegador. Pide una clave (está en Vercel, no en el repo). El libro se guarda en un almacén privado, no en el ordenador. Si guardas desde dos pestañas a la vez, se queda la última. En la web valen CSV, Excel, PDF y Norma 43. Un PDF escaneado, sin texto, no se lee. Si subes un extracto antes de crear la cuenta, el fichero queda guardado en el libro y se engancha solo cuando el IBAN coincide.
+La misma interfaz está en https://extractos-wine.vercel.app. Allí no hay carpeta inbox: se elige el fichero en el navegador. Pide una clave (está en Vercel, no en el repo). El libro se guarda en un almacén privado, no en el ordenador. Si guardas desde dos pestañas a la vez, se queda la última. En la web valen CSV, Excel, PDF y Norma 43. Un PDF escaneado, sin texto, no se lee. Si subes un extracto antes de que exista la cuenta, el fichero queda guardado en el libro y se engancha solo cuando el IBAN coincide.
 
-1. En **Cuentas**, crea una cuenta por cada banco. El alias reconoce el fichero (`caixa-nomina-enero.csv` con alias `caixa-nomina`). El IBAN, si viene en el extracto, también. Marca **Saldo para Fuck You Money** en las que quieras seguir.
-2. Pulsa **Traer propiedades y cuentas**. Lee los nombres de Finca y los saldos declarados de Fuck You Money. No cambia Fuck You Money.
-3. Deja los extractos en `inbox/` (CSV, Excel, Norma 43 o PDF) o elígelos desde la pantalla. `npm run import` hace lo mismo sin abrir la interfaz.
-4. En **Bandeja**, en cada apunte de un piso elige propiedad, categoría de Finca y el concepto. **Conciliar con la propiedad** lo recuerda y lo escribe en Finca. Un alquiler cobrado es un ingreso, con la categoría Alquiler mensual. **Es un traspaso** si mueves dinero entre cuentas tuyas. **No es de una propiedad** lo deja fuera del gasto en bruto.
+1. Al abrir, Extractos trae las cuentas bancarias de Fuck You Money y las deja listas para asignar el extracto. No hace falta crearlas. Una que no esté allí se añade en **Cuentas**. El alias reconoce el fichero (`caixa-nomina-enero.csv` con alias `caixa-nomina`). El IBAN, si viene en el extracto, también. Las que vienen de Fuck You Money ya entran en el saldo de esa app; puedes desmarcarlas.
+2. **Traer propiedades y cuentas** vuelve a leer Finca y esas cuentas. No cambia Fuck You Money. Solo entran las cuentas bancarias: corriente, ahorro, remunerada y nómina. Un saldo marcado como otra cosa se deja fuera.
+3. Deja los extractos en `inbox/` (CSV, Excel, Norma 43 o PDF) o elígelos desde la pantalla. `npm run import` hace lo mismo sin abrir la interfaz. Si el extracto no reconoce la cuenta, elígela en el aviso de arriba.
+4. En **Apuntes**, puntea cada línea. En un apunte de un piso elige propiedad, categoría de Finca y el concepto. **Conciliar con la propiedad** lo recuerda y lo escribe en Finca. Un alquiler cobrado es un ingreso, con la categoría Alquiler mensual. **Es un traspaso** si mueves dinero entre cuentas tuyas. **No es de una propiedad** lo deja fuera del gasto en bruto.
 5. En **Registro** ves el saldo, el historial de las cuentas marcadas y el gasto en bruto del mes.
 6. En **Finca** ves qué se ha escrito y puedes reintentar si la base no respondió. Corregir el apunte aquí actualiza la misma fila de Finca. Si lo sacas de la propiedad, se borra solo la fila que creó este libro.
 

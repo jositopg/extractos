@@ -72,6 +72,13 @@ export const DESTINO_LABEL: Record<Destino, string> = {
 export const TIPOS_CUENTA = ['corriente', 'ahorro', 'remunerada', 'nomina', 'otro'] as const
 export type TipoCuenta = (typeof TIPOS_CUENTA)[number]
 
+/** Efectivo de Fuck You Money que es una cuenta de banco. `otro` no entra. */
+export const TIPOS_CUENTA_BANCARIA = ['corriente', 'ahorro', 'remunerada', 'nomina'] as const
+
+export function esCuentaBancaria(tipo: string | null | undefined): tipo is (typeof TIPOS_CUENTA_BANCARIA)[number] {
+  return (TIPOS_CUENTA_BANCARIA as readonly string[]).includes(tipo ?? '')
+}
+
 export const TIPO_CUENTA_LABEL: Record<TipoCuenta, string> = {
   corriente: 'Corriente',
   ahorro: 'Ahorro',

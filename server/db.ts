@@ -2,7 +2,8 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Destino, TipoCuenta } from '../shared/categorias'
-import { esDestino, esTipoCuenta } from '../shared/categorias'
+import { esCuentaBancaria, esDestino, esTipoCuenta } from '../shared/categorias'
+import { normalizar } from '../shared/money'
 
 export type Db = DatabaseSync
 
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS fym_cash (
   id TEXT PRIMARY KEY,
   nombre TEXT NOT NULL,
   valor_centimos INTEGER,
+  tipo TEXT NOT NULL DEFAULT '',
   visto_en TEXT NOT NULL
 );
 
@@ -111,6 +113,7 @@ export function openDb(path: string, opciones?: { wal?: boolean }): Db {
   if (path !== ':memory:') db.exec(opciones?.wal === false ? 'PRAGMA journal_mode = DELETE' : 'PRAGMA journal_mode = WAL')
   db.exec(SCHEMA)
   asegurarColumna(db, 'cuentas', 'en_fym', 'en_fym INTEGER NOT NULL DEFAULT 0')
+  asegurarColumna(db, 'fym_cash', 'tipo', "tipo TEXT NOT NULL DEFAULT ''")
   asegurarColumna(db, 'movimientos', 'finca_tx_id', 'finca_tx_id TEXT')
   asegurarColumna(db, 'movimientos', 'finca_sincronizado_en', 'finca_sincronizado_en TEXT')
   asegurarColumna(db, 'movimientos', 'finca_error', 'finca_error TEXT')
@@ -208,6 +211,7 @@ export type FymRow = {
   id: string
   nombre: string
   valor_centimos: number | null
+  tipo: string
   visto_en: string
 }
 
@@ -315,13 +319,66 @@ export function reemplazarFym(db: Db, rows: FymRow[]): void {
   db.exec('BEGIN')
   try {
     db.exec('DELETE FROM fym_cash')
-    const stmt = db.prepare('INSERT INTO fym_cash (id, nombre, valor_centimos, visto_en) VALUES (?, ?, ?, ?)')
-    for (const row of rows) stmt.run(row.id, row.nombre, row.valor_centimos, row.visto_en)
+    const stmt = db.prepare('INSERT INTO fym_cash (id, nombre, valor_centimos, tipo, visto_en) VALUES (?, ?, ?, ?, ?)')
+    for (const row of rows) stmt.run(row.id, row.nombre, row.valor_centimos, row.tipo, row.visto_en)
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
   }
+}
+
+/** Crea o actualiza la cuenta local de cada saldo bancario de Fuck You Money. No borra cuentas. */
+export function asegurarCuentasDesdeFym(
+  db: Db,
+  rows: Array<{ id: string; nombre: string; tipo: string }>,
+  ahora: string,
+): number {
+  let n = 0
+  for (const row of rows) {
+    const tipoDicho = row.tipo.trim()
+    if (tipoDicho && !esCuentaBancaria(tipoDicho)) continue
+    const nombre = row.nombre.trim()
+    const id = row.id.trim()
+    if (!nombre || !id) continue
+    const tipoNuevo = esCuentaBancaria(tipoDicho) ? tipoDicho : null
+    const ligada = get<CuentaRow>(db, 'SELECT * FROM cuentas WHERE fym_asset_id = ?', id)
+    if (ligada) {
+      updateCuenta(db, { ...ligada, nombre, tipo: tipoNuevo ?? ligada.tipo })
+      n += 1
+      continue
+    }
+    const porId = getCuenta(db, id)
+    if (porId && (!porId.fym_asset_id || porId.fym_asset_id === id)) {
+      updateCuenta(db, { ...porId, nombre, tipo: tipoNuevo ?? porId.tipo, fym_asset_id: id })
+      n += 1
+      continue
+    }
+    const mismoNombre = listCuentas(db).filter((c) => !c.fym_asset_id && normalizar(c.nombre) === normalizar(nombre))
+    if (mismoNombre.length === 1) {
+      const actual = mismoNombre[0]
+      updateCuenta(db, { ...actual, nombre, tipo: tipoNuevo ?? actual.tipo, fym_asset_id: id })
+      n += 1
+      continue
+    }
+    if (porId) continue
+    insertCuenta(db, {
+      id,
+      nombre,
+      banco: '',
+      alias: '',
+      iban: '',
+      ccc: '',
+      tipo: tipoNuevo ?? 'corriente',
+      fym_asset_id: id,
+      en_fym: 1,
+      saldo_inicial_centimos: null,
+      saldo_inicial_fecha: null,
+      creado_en: ahora,
+    })
+    n += 1
+  }
+  return n
 }
 
 export function hayHash(db: Db, hash: string): boolean {

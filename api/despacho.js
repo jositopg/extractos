@@ -65,6 +65,10 @@ var CATEGORIAS_INGRESO_PERSONAL = [
 var CATEGORIAS_PERSONAL_FUERA_DE_VIDA = ["Ahorro e inversi\xF3n", "Devoluci\xF3n de deuda"];
 var DESTINOS = ["pendiente", "finca", "personal", "traspaso", "ignorar"];
 var TIPOS_CUENTA = ["corriente", "ahorro", "remunerada", "nomina", "otro"];
+var TIPOS_CUENTA_BANCARIA = ["corriente", "ahorro", "remunerada", "nomina"];
+function esCuentaBancaria(tipo) {
+  return TIPOS_CUENTA_BANCARIA.includes(tipo ?? "");
+}
 function esDestino(value) {
   return DESTINOS.includes(value);
 }
@@ -73,6 +77,119 @@ function esTipoCuenta(value) {
 }
 function categoriaVida(categoria) {
   return CATEGORIAS_GASTO_PERSONAL.includes(categoria) && !CATEGORIAS_PERSONAL_FUERA_DE_VIDA.includes(categoria);
+}
+
+// shared/money.ts
+function centimosDesdeTexto(raw) {
+  let s = raw.trim().replace(/€/g, "").replace(/\s/g, "");
+  if (!s) return NaN;
+  let sign = 1;
+  if (s.startsWith("(") && s.endsWith(")")) {
+    sign = -1;
+    s = s.slice(1, -1);
+  }
+  if (s.endsWith("-")) {
+    sign = -1;
+    s = s.slice(0, -1);
+  } else if (s.startsWith("-")) {
+    sign = -1;
+    s = s.slice(1);
+  } else if (s.startsWith("+")) {
+    s = s.slice(1);
+  }
+  if (!/^\d[\d.,]*$/.test(s)) return NaN;
+  if (s.includes(",") && s.includes(".")) {
+    if (s.lastIndexOf(".") > s.lastIndexOf(",")) s = s.replace(/,/g, "");
+    else s = s.replace(/\./g, "");
+  }
+  let entero;
+  let decimal = "";
+  if (s.includes(",")) {
+    const partes = s.split(",");
+    if (partes.length !== 2 || partes[1].length > 2) return NaN;
+    entero = partes[0].replace(/\./g, "");
+    decimal = partes[1];
+  } else if (s.includes(".")) {
+    const partes = s.split(".");
+    if (partes.length === 2 && partes[1].length <= 2) {
+      entero = partes[0];
+      decimal = partes[1];
+    } else if (partes.every((p, i) => /^\d+$/.test(p) && (i === 0 || p.length === 3))) {
+      entero = partes.join("");
+    } else {
+      return NaN;
+    }
+  } else {
+    entero = s;
+  }
+  if (!/^\d+$/.test(entero) || decimal !== "" && !/^\d+$/.test(decimal)) return NaN;
+  decimal = decimal.padEnd(2, "0");
+  const n = Number(entero) * 100 + Number(decimal);
+  if (!Number.isSafeInteger(n)) return NaN;
+  return sign * n;
+}
+function parseFecha(raw) {
+  const s = raw.trim();
+  let y;
+  let m;
+  let d;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (iso) {
+    y = Number(iso[1]);
+    m = Number(iso[2]);
+    d = Number(iso[3]);
+  } else {
+    const dm = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/.exec(s);
+    if (!dm) return null;
+    d = Number(dm[1]);
+    m = Number(dm[2]);
+    y = Number(dm[3]);
+  }
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+function fechaYyMmDd(raw) {
+  if (!/^\d{6}$/.test(raw)) return null;
+  const yy = Number(raw.slice(0, 2));
+  const year = yy >= 80 ? 1900 + yy : 2e3 + yy;
+  return parseFecha(`${year}-${raw.slice(2, 4)}-${raw.slice(4, 6)}`);
+}
+function normalizar(s) {
+  return s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+function ccc18DesdeCuenta(texto) {
+  const m = texto.match(/n[uú]mero de cuenta\s*:?\s*((?:\d\s*){20})/i);
+  if (!m?.[1]) return void 0;
+  const d = m[1].replace(/\D/g, "");
+  if (d.length !== 20) return void 0;
+  return d.slice(0, 8) + d.slice(10);
+}
+function cccDesdeIban(iban) {
+  const d = iban.replace(/\s/g, "").toUpperCase();
+  if (!/^ES\d{22}$/.test(d)) return null;
+  return d.slice(4, 12) + d.slice(14, 24);
+}
+function ibanCoincideConCcc(iban, ccc18) {
+  const ccc = cccDesdeIban(iban);
+  const limpio = ccc18.replace(/\D/g, "");
+  return ccc != null && limpio.length === 18 && ccc === limpio;
+}
+function buscarIban(texto) {
+  const m = texto.toUpperCase().match(/ES(?:\s*\d){22}/);
+  if (!m) return null;
+  const iban = m[0].replace(/\s/g, "");
+  return /^ES\d{22}$/.test(iban) ? iban : null;
+}
+function hoyLocal(d = /* @__PURE__ */ new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function mesDe(fecha) {
+  return fecha.slice(0, 7);
 }
 
 // server/db.ts
@@ -103,6 +220,7 @@ CREATE TABLE IF NOT EXISTS fym_cash (
   id TEXT PRIMARY KEY,
   nombre TEXT NOT NULL,
   valor_centimos INTEGER,
+  tipo TEXT NOT NULL DEFAULT '',
   visto_en TEXT NOT NULL
 );
 
@@ -180,6 +298,7 @@ function openDb(path, opciones) {
   if (path !== ":memory:") db.exec(opciones?.wal === false ? "PRAGMA journal_mode = DELETE" : "PRAGMA journal_mode = WAL");
   db.exec(SCHEMA);
   asegurarColumna(db, "cuentas", "en_fym", "en_fym INTEGER NOT NULL DEFAULT 0");
+  asegurarColumna(db, "fym_cash", "tipo", "tipo TEXT NOT NULL DEFAULT ''");
   asegurarColumna(db, "movimientos", "finca_tx_id", "finca_tx_id TEXT");
   asegurarColumna(db, "movimientos", "finca_sincronizado_en", "finca_sincronizado_en TEXT");
   asegurarColumna(db, "movimientos", "finca_error", "finca_error TEXT");
@@ -282,13 +401,60 @@ function reemplazarFym(db, rows) {
   db.exec("BEGIN");
   try {
     db.exec("DELETE FROM fym_cash");
-    const stmt = db.prepare("INSERT INTO fym_cash (id, nombre, valor_centimos, visto_en) VALUES (?, ?, ?, ?)");
-    for (const row of rows) stmt.run(row.id, row.nombre, row.valor_centimos, row.visto_en);
+    const stmt = db.prepare("INSERT INTO fym_cash (id, nombre, valor_centimos, tipo, visto_en) VALUES (?, ?, ?, ?, ?)");
+    for (const row of rows) stmt.run(row.id, row.nombre, row.valor_centimos, row.tipo, row.visto_en);
     db.exec("COMMIT");
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;
   }
+}
+function asegurarCuentasDesdeFym(db, rows, ahora) {
+  let n = 0;
+  for (const row of rows) {
+    const tipoDicho = row.tipo.trim();
+    if (tipoDicho && !esCuentaBancaria(tipoDicho)) continue;
+    const nombre = row.nombre.trim();
+    const id = row.id.trim();
+    if (!nombre || !id) continue;
+    const tipoNuevo = esCuentaBancaria(tipoDicho) ? tipoDicho : null;
+    const ligada = get(db, "SELECT * FROM cuentas WHERE fym_asset_id = ?", id);
+    if (ligada) {
+      updateCuenta(db, { ...ligada, nombre, tipo: tipoNuevo ?? ligada.tipo });
+      n += 1;
+      continue;
+    }
+    const porId = getCuenta(db, id);
+    if (porId && (!porId.fym_asset_id || porId.fym_asset_id === id)) {
+      updateCuenta(db, { ...porId, nombre, tipo: tipoNuevo ?? porId.tipo, fym_asset_id: id });
+      n += 1;
+      continue;
+    }
+    const mismoNombre = listCuentas(db).filter((c) => !c.fym_asset_id && normalizar(c.nombre) === normalizar(nombre));
+    if (mismoNombre.length === 1) {
+      const actual = mismoNombre[0];
+      updateCuenta(db, { ...actual, nombre, tipo: tipoNuevo ?? actual.tipo, fym_asset_id: id });
+      n += 1;
+      continue;
+    }
+    if (porId) continue;
+    insertCuenta(db, {
+      id,
+      nombre,
+      banco: "",
+      alias: "",
+      iban: "",
+      ccc: "",
+      tipo: tipoNuevo ?? "corriente",
+      fym_asset_id: id,
+      en_fym: 1,
+      saldo_inicial_centimos: null,
+      saldo_inicial_fecha: null,
+      creado_en: ahora
+    });
+    n += 1;
+  }
+  return n;
 }
 function hayHash(db, hash) {
   return get(db, "SELECT id FROM archivos WHERE contenido_hash = ? LIMIT 1", hash) != null;
@@ -859,121 +1025,6 @@ function propiedadLocal(id) {
 
 // server/ids.ts
 import { createHash as createHash2 } from "node:crypto";
-
-// shared/money.ts
-function centimosDesdeTexto(raw) {
-  let s = raw.trim().replace(/€/g, "").replace(/\s/g, "");
-  if (!s) return NaN;
-  let sign = 1;
-  if (s.startsWith("(") && s.endsWith(")")) {
-    sign = -1;
-    s = s.slice(1, -1);
-  }
-  if (s.endsWith("-")) {
-    sign = -1;
-    s = s.slice(0, -1);
-  } else if (s.startsWith("-")) {
-    sign = -1;
-    s = s.slice(1);
-  } else if (s.startsWith("+")) {
-    s = s.slice(1);
-  }
-  if (!/^\d[\d.,]*$/.test(s)) return NaN;
-  if (s.includes(",") && s.includes(".")) {
-    if (s.lastIndexOf(".") > s.lastIndexOf(",")) s = s.replace(/,/g, "");
-    else s = s.replace(/\./g, "");
-  }
-  let entero;
-  let decimal = "";
-  if (s.includes(",")) {
-    const partes = s.split(",");
-    if (partes.length !== 2 || partes[1].length > 2) return NaN;
-    entero = partes[0].replace(/\./g, "");
-    decimal = partes[1];
-  } else if (s.includes(".")) {
-    const partes = s.split(".");
-    if (partes.length === 2 && partes[1].length <= 2) {
-      entero = partes[0];
-      decimal = partes[1];
-    } else if (partes.every((p, i) => /^\d+$/.test(p) && (i === 0 || p.length === 3))) {
-      entero = partes.join("");
-    } else {
-      return NaN;
-    }
-  } else {
-    entero = s;
-  }
-  if (!/^\d+$/.test(entero) || decimal !== "" && !/^\d+$/.test(decimal)) return NaN;
-  decimal = decimal.padEnd(2, "0");
-  const n = Number(entero) * 100 + Number(decimal);
-  if (!Number.isSafeInteger(n)) return NaN;
-  return sign * n;
-}
-function parseFecha(raw) {
-  const s = raw.trim();
-  let y;
-  let m;
-  let d;
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  if (iso) {
-    y = Number(iso[1]);
-    m = Number(iso[2]);
-    d = Number(iso[3]);
-  } else {
-    const dm = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/.exec(s);
-    if (!dm) return null;
-    d = Number(dm[1]);
-    m = Number(dm[2]);
-    y = Number(dm[3]);
-  }
-  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
-  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-}
-function fechaYyMmDd(raw) {
-  if (!/^\d{6}$/.test(raw)) return null;
-  const yy = Number(raw.slice(0, 2));
-  const year = yy >= 80 ? 1900 + yy : 2e3 + yy;
-  return parseFecha(`${year}-${raw.slice(2, 4)}-${raw.slice(4, 6)}`);
-}
-function normalizar(s) {
-  return s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-function ccc18DesdeCuenta(texto) {
-  const m = texto.match(/n[uú]mero de cuenta\s*:?\s*((?:\d\s*){20})/i);
-  if (!m?.[1]) return void 0;
-  const d = m[1].replace(/\D/g, "");
-  if (d.length !== 20) return void 0;
-  return d.slice(0, 8) + d.slice(10);
-}
-function cccDesdeIban(iban) {
-  const d = iban.replace(/\s/g, "").toUpperCase();
-  if (!/^ES\d{22}$/.test(d)) return null;
-  return d.slice(4, 12) + d.slice(14, 24);
-}
-function ibanCoincideConCcc(iban, ccc18) {
-  const ccc = cccDesdeIban(iban);
-  const limpio = ccc18.replace(/\D/g, "");
-  return ccc != null && limpio.length === 18 && ccc === limpio;
-}
-function buscarIban(texto) {
-  const m = texto.toUpperCase().match(/ES(?:\s*\d){22}/);
-  if (!m) return null;
-  const iban = m[0].replace(/\s/g, "");
-  return /^ES\d{22}$/.test(iban) ? iban : null;
-}
-function hoyLocal(d = /* @__PURE__ */ new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-function mesDe(fecha) {
-  return fecha.slice(0, 7);
-}
-
-// server/ids.ts
 function sha256(text) {
   return createHash2("sha256").update(text).digest("hex");
 }
@@ -1583,8 +1634,16 @@ async function consultar(urls, sql) {
   }
   throw new Error(last);
 }
+function errorFym(err) {
+  const msg = mensajeError(err);
+  if (/ENOTFOUND|NXDOMAIN|tenant\/user|getaddrinfo/i.test(msg)) {
+    return "Fuck You Money no responde. Si el proyecto est\xE1 pausado en Supabase, rean\xFAdalo y vuelve a abrir Extractos.";
+  }
+  return `Fuck You Money: ${msg}`;
+}
 async function sincronizarCatalogos(db) {
   const errores = [];
+  const avisos = [];
   let propiedades = null;
   let fymCuentas = null;
   const ahora = (/* @__PURE__ */ new Date()).toISOString();
@@ -1614,24 +1673,45 @@ async function sincronizarCatalogos(db) {
   } else {
     try {
       const rows = await consultar(
-        [fymUrl],
-        `SELECT id, name, manual_value FROM assets WHERE type = 'cash' ORDER BY name`
+        fincaUrlsToTry(fymUrl),
+        `SELECT id, name, manual_value, institution FROM assets WHERE type = 'cash' ORDER BY name`
       );
+      const bancarias = [];
+      let fuera = 0;
+      for (const row of rows) {
+        const tipo = row.institution == null ? "" : String(row.institution).trim();
+        if (tipo && !esCuentaBancaria(tipo)) {
+          fuera += 1;
+          continue;
+        }
+        const id = String(row.id ?? "").trim();
+        const nombre = String(row.name ?? "").trim();
+        if (!id || !nombre) continue;
+        bancarias.push({ id, nombre, tipo, valor_centimos: centimosPg(row.manual_value) });
+      }
       reemplazarFym(
         db,
-        rows.map((r) => ({
-          id: String(r.id),
-          nombre: String(r.name),
-          valor_centimos: centimosPg(r.manual_value),
+        bancarias.map((row) => ({
+          id: row.id,
+          nombre: row.nombre,
+          valor_centimos: row.valor_centimos,
+          tipo: row.tipo,
           visto_en: ahora
         }))
       );
-      fymCuentas = rows.length;
+      asegurarCuentasDesdeFym(db, bancarias, ahora);
+      fymCuentas = bancarias.length;
+      if (fuera > 0) {
+        avisos.push(
+          fuera === 1 ? "He dejado fuera 1 saldo que no es una cuenta bancaria." : `He dejado fuera ${fuera} saldos que no son cuenta bancaria.`
+        );
+      }
+      if (bancarias.length === 0) avisos.push("Fuck You Money no ha devuelto cuentas bancarias.");
     } catch (err) {
-      errores.push(`Fuck You Money: ${mensajeError(err)}`);
+      errores.push(errorFym(err));
     }
   }
-  return { propiedades, fymCuentas, errores };
+  return { propiedades, fymCuentas, errores, avisos };
 }
 
 // server/importar.ts
