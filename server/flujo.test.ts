@@ -118,8 +118,21 @@ describe('flujo de un extracto', () => {
     const segundo = await svc.importar()
     expect(segundo.movimientos).toBe(1)
     const febrero = svc.movimientos({}).find((m) => m.fecha === '2026-02-20')
-    expect(febrero).toMatchObject({ destino: 'finca', categoriaFinca: 'Electricidad', propiedadId, fincaError: null })
+    expect(febrero).toMatchObject({ destino: 'pendiente', categoriaFinca: null, propiedadId: null, fincaError: null })
+    expect(febrero?.sugerencia).toMatchObject({
+      destino: 'finca',
+      categoriaFinca: 'Electricidad',
+      propiedadId,
+      patron: 'endesa',
+    })
+    expect(llamadas.n).toBe(2)
+    await svc.clasificar(febrero!.id, {
+      destino: 'finca',
+      categoriaFinca: 'Electricidad',
+      propiedadId,
+    })
     expect(escrituras.at(-1)).toMatchObject({ importe: '30.00', referencia: `extractos:${febrero!.id}` })
+    expect(llamadas.n).toBe(3)
 
     const otraVez = await svc.importar()
     expect(otraVez.yaEstaban).toBe(2)

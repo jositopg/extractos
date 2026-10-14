@@ -16,6 +16,7 @@ import {
   contarArchivosHash,
   deleteArchivo,
   deleteMovimientosArchivo,
+  deleteRepartosMovimiento,
   destinoDe,
   getArchivo,
   getCuenta,
@@ -27,7 +28,9 @@ import {
   listApuntesCuenta,
   listArchivos,
   listArchivosHash,
+  listMovimientosArchivo,
   maxFechaCuenta,
+  moverRepartos,
   olvidarLecturaFallida,
   hayMovimiento,
   insertArchivo,
@@ -77,7 +80,7 @@ function dentro(dir: string, file: string): boolean {
   return full === root || full.startsWith(root + sep)
 }
 
-function reglasDominio(db: Db): Regla[] {
+export function reglasDelLibro(db: Db): Regla[] {
   return listReglas(db).map((r) => ({
     id: r.id,
     patron: r.patron,
@@ -123,6 +126,79 @@ function aplicarRegla(
     categoriaPersonal: regla.destino === 'personal' ? (regla.categoriaPersonal ?? null) : null,
     reglaId: regla.id,
   }
+}
+
+export type SugerenciaMovimiento = {
+  destino: Regla['destino']
+  categoriaFinca: string | null
+  propiedadId: string | null
+  propiedadNombre: string | null
+  categoriaPersonal: string | null
+  patron: string
+}
+
+/** La regla que ganaría ahora. El import no la aplica: solo se enseña. */
+export function sugerirMovimiento(
+  db: Db,
+  reglas: Regla[],
+  concepto: string,
+  importeCentimos: number,
+): SugerenciaMovimiento | null {
+  const clas = aplicarRegla(db, reglas, concepto, importeCentimos)
+  if (clas.destino === 'pendiente' || !clas.reglaId) return null
+  const regla = reglas.find((r) => r.id === clas.reglaId)
+  return {
+    destino: clas.destino,
+    categoriaFinca: clas.categoriaFinca,
+    propiedadId: clas.propiedadId,
+    propiedadNombre: clas.propiedadId ? (getPropiedad(db, clas.propiedadId)?.nombre ?? null) : null,
+    categoriaPersonal: clas.categoriaPersonal,
+    patron: regla?.patron ?? '',
+  }
+}
+
+export function coincidenciasRegla(
+  db: Db,
+  candidata: {
+    patron: string
+    destino: Regla['destino']
+    categoriaFinca: string | null
+    propiedadId: string | null
+    categoriaPersonal: string | null
+  },
+): Array<{ id: string; fecha: string; concepto: string; importeCentimos: number; cuentaNombre: string }> {
+  const patron = normalizar(candidata.patron)
+  const nueva: Regla = {
+    id: 'nueva',
+    patron,
+    destino: candidata.destino,
+    categoriaFinca: candidata.categoriaFinca,
+    propiedadId: candidata.propiedadId,
+    categoriaPersonal: candidata.categoriaPersonal,
+    creadoEn: new Date().toISOString(),
+  }
+  const reglas = reglasDelLibro(db).filter((r) => normalizar(r.patron) !== patron)
+  reglas.push(nueva)
+  const rows = db
+    .prepare(
+      `SELECT m.id, m.fecha, m.concepto, m.importe_centimos, c.nombre AS cuenta_nombre
+       FROM movimientos m JOIN cuentas c ON c.id = m.cuenta_id
+       WHERE m.destino = 'pendiente'`,
+    )
+    .all() as Array<{ id: string; fecha: string; concepto: string; importe_centimos: number; cuenta_nombre: string }>
+  const coincidencias = []
+  for (const mov of rows) {
+    const clas = aplicarRegla(db, reglas, mov.concepto, mov.importe_centimos)
+    if (clas.reglaId !== 'nueva') continue
+    coincidencias.push({
+      id: mov.id,
+      fecha: mov.fecha,
+      concepto: mov.concepto,
+      importeCentimos: mov.importe_centimos,
+      cuentaNombre: mov.cuenta_nombre,
+    })
+  }
+  return coincidencias
 }
 
 function apunteDeCuenta(db: Db, cuentaId: string): ApunteVisto | null {
@@ -178,8 +254,6 @@ function insertarMovimientos(
   cuentaId: string,
   archivoId: string,
   bloque: BloqueParseado,
-  reglas: Regla[],
-  ahora: string,
 ): { insertados: number; duplicados: number } {
   const porSaldo = saldoIdentificaLinea(bloque.movimientos)
   const vistos = new Map<string, number>()
@@ -209,7 +283,6 @@ function insertarMovimientos(
       duplicados += 1
       continue
     }
-    const clas = aplicarRegla(db, reglas, mov.concepto, mov.importeCentimos)
     insertMovimiento(db, {
       id,
       cuentaId,
@@ -221,13 +294,14 @@ function insertarMovimientos(
       saldoCentimos: mov.saldoCentimos ?? null,
       concepto: mov.concepto,
       documento: mov.documento ?? '',
-      destino: clas.destino,
-      categoriaFinca: clas.categoriaFinca,
-      propiedadId: clas.propiedadId,
-      categoriaPersonal: clas.categoriaPersonal,
+      destino: 'pendiente',
+      categoriaFinca: null,
+      propiedadId: null,
+      categoriaPersonal: null,
       nota: '',
-      reglaId: clas.reglaId,
-      clasificadoEn: clas.destino === 'pendiente' ? null : ahora,
+      reglaId: null,
+      clasificadoEn: null,
+      ordinalClave: ordinal,
     })
     insertados += 1
   }
@@ -316,14 +390,12 @@ function volcarBloque(
   cuentaId: string,
   archivoId: string,
   bloque: BloqueParseado,
-  reglas: Regla[],
-  ahora: string,
   avisosPrevios: string,
 ): { insertados: number; duplicados: number; hueco: string; antes: ApunteVisto | null } {
   const antes = apunteDeCuenta(db, cuentaId)
   const hueco = textoHueco(db, cuentaId, bloque.desde)
   const avisos = [avisosPrevios, hueco].filter(Boolean).join('\n')
-  const volcado = insertarMovimientos(db, cuentaId, archivoId, bloque, reglas, ahora)
+  const volcado = insertarMovimientos(db, cuentaId, archivoId, bloque)
   updateArchivoCuenta(db, archivoId, {
     cuentaId,
     movimientos: volcado.insertados,
@@ -354,10 +426,8 @@ async function reengancharSueltos(
     parcial.errores.push({ nombre, error: parsed.error })
     return parcial
   }
-  const reglas = reglasDominio(db)
   const cuentas = cuentasPista(db)
   const bloques = identificarBloques(hash, parsed.bloques)
-  const ahora = new Date().toISOString()
   db.exec('BEGIN')
   try {
     guardarFichero(db, hash, nombre, buf)
@@ -371,7 +441,7 @@ async function reengancharSueltos(
         parcial.notas.push(notaSinCuenta(archivo.nombre, bloque.movimientos.length))
         continue
       }
-      const volcado = volcarBloque(db, cuentaId, archivo.id, bloque, reglas, ahora, archivo.avisos)
+      const volcado = volcarBloque(db, cuentaId, archivo.id, bloque, archivo.avisos)
       parcial.movimientos += volcado.insertados
       parcial.duplicados += volcado.duplicados
       parcial.notas.push(
@@ -498,7 +568,6 @@ export async function importarInbox(db: Db, rutas: Rutas): Promise<ImportacionJs
       continue
     }
 
-    const reglas = reglasDominio(db)
     const cuentas = cuentasPista(db)
     const bloques = identificarBloques(hash, parsed.bloques)
     db.exec('BEGIN')
@@ -532,7 +601,7 @@ export async function importarInbox(db: Db, rutas: Rutas): Promise<ImportacionJs
           resultado.notas.push(notaSinCuenta(nombre, bloque.movimientos.length))
           continue
         }
-        const volcado = volcarBloque(db, cuentaId, bloque.id, bloque, reglas, ahora, avisosPrevios)
+        const volcado = volcarBloque(db, cuentaId, bloque.id, bloque, avisosPrevios)
         resultado.movimientos += volcado.insertados
         resultado.duplicados += volcado.duplicados
         resultado.notas.push(
@@ -600,11 +669,9 @@ export async function asignarArchivo(db: Db, rutas: Rutas, archivoId: string, cu
   const bloque = identificarBloques(archivo.contenido_hash, parsed.bloques).find((b) => b.id === archivoId)
   if (!bloque) throw new HttpError(400, 'No encuentro ese bloque en el fichero')
 
-  const ahora = new Date().toISOString()
-  const reglas = reglasDominio(db)
   db.exec('BEGIN')
   try {
-    volcarBloque(db, cuentaId, archivoId, bloque, reglas, ahora, archivo.avisos)
+    volcarBloque(db, cuentaId, archivoId, bloque, archivo.avisos)
     soltarBytesSiYaNoHacenFalta(db, archivo.contenido_hash)
     db.exec('COMMIT')
   } catch (err) {
@@ -635,10 +702,9 @@ export async function engancharPendientes(
     if (!bloque) continue
     const eleccion = elegirCuenta(bloque, archivo.nombre, cuentas)
     if (!eleccion || !('id' in eleccion)) continue
-    const ahora = new Date().toISOString()
     db.exec('BEGIN')
     try {
-      const volcado = volcarBloque(db, eleccion.id, archivo.id, bloque, reglasDominio(db), ahora, archivo.avisos)
+      const volcado = volcarBloque(db, eleccion.id, archivo.id, bloque, archivo.avisos)
       soltarBytesSiYaNoHacenFalta(db, archivo.contenido_hash)
       db.exec('COMMIT')
       movimientos += volcado.insertados
@@ -695,8 +761,75 @@ export function guardarSubida(rutas: Rutas, nombre: string, buf: Buffer): string
   return candidato
 }
 
+function claveIban(valor: string): string {
+  return valor.replace(/\s/g, '').toUpperCase()
+}
+
+/** Cambia la cuenta de un extracto ya cargado y rehace los ids. El IBAN solo se mueve si esa cuenta lo aprendió de este fichero. */
+export function moverArchivo(db: Db, archivoId: string, cuentaId: string): void {
+  const archivo = getArchivo(db, archivoId)
+  if (!archivo) throw new HttpError(404, 'No encuentro ese extracto')
+  if (!archivo.cuenta_id) throw new HttpError(400, 'Este extracto todavía no tiene cuenta')
+  if (archivo.cuenta_id === cuentaId) return
+  const destino = getCuenta(db, cuentaId)
+  if (!destino) throw new HttpError(400, 'No encuentro esa cuenta')
+  const origen = getCuenta(db, archivo.cuenta_id)
+  const movs = listMovimientosArchivo(db, archivoId)
+  db.exec('BEGIN')
+  try {
+    const vistos = new Map<string, number>()
+    for (const mov of movs) {
+      const doc = (mov.documento ?? '').replace(/\D/g, '').replace(/^0+$/, '')
+      const clave = `${mov.fecha}|${mov.importe_centimos}|${normalizar(mov.concepto)}`
+      let ordinal = mov.ordinal_clave
+      if (ordinal == null) {
+        ordinal = doc ? 0 : (vistos.get(clave) ?? 0)
+        if (!doc) vistos.set(clave, ordinal + 1)
+      }
+      const nuevoId = idMovimiento(cuentaId, {
+        fecha: mov.fecha,
+        importeCentimos: mov.importe_centimos,
+        concepto: mov.concepto,
+        documento: mov.documento,
+        ordinal,
+      })
+      if (nuevoId !== mov.id && hayMovimiento(db, nuevoId)) {
+        deleteRepartosMovimiento(db, mov.id)
+        db.prepare('DELETE FROM movimientos WHERE id = ?').run(mov.id)
+        continue
+      }
+      if (nuevoId !== mov.id) moverRepartos(db, mov.id, nuevoId)
+      db.prepare('UPDATE movimientos SET id = ?, cuenta_id = ?, ordinal_clave = ? WHERE id = ?').run(
+        nuevoId,
+        cuentaId,
+        ordinal,
+        mov.id,
+      )
+    }
+    const quedan = db.prepare('SELECT COUNT(*) AS c FROM movimientos WHERE archivo_id = ?').get(archivoId) as { c: number }
+    db.prepare('UPDATE archivos SET cuenta_id = ?, movimientos = ? WHERE id = ?').run(cuentaId, Number(quedan.c), archivoId)
+    if (origen) {
+      const otros = listArchivos(db).filter((a) => a.id !== archivoId && a.cuenta_id === origen.id)
+      const ibanArchivo = claveIban(archivo.iban)
+      const cccArchivo = archivo.ccc.replace(/\D/g, '')
+      let iban = origen.iban
+      let ccc = origen.ccc
+      const otroIban = otros.some((a) => ibanArchivo && claveIban(a.iban) === ibanArchivo)
+      const otroCcc = otros.some((a) => cccArchivo && a.ccc.replace(/\D/g, '') === cccArchivo)
+      if (ibanArchivo && claveIban(origen.iban) === ibanArchivo && !otroIban) iban = ''
+      if (cccArchivo && origen.ccc.replace(/\D/g, '') === cccArchivo && !otroCcc) ccc = ''
+      if (iban !== origen.iban || ccc !== origen.ccc) updateCuenta(db, { ...origen, iban, ccc })
+    }
+    aprenderCuenta(db, cuentaId, { iban: archivo.iban, ccc: archivo.ccc } as BloqueParseado)
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
 export function aplicarReglasPendientes(db: Db): number {
-  const reglas = reglasDominio(db)
+  const reglas = reglasDelLibro(db)
   const pendientes = listPendientes(db)
   const ahora = new Date().toISOString()
   let n = 0

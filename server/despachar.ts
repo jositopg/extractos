@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { ClasificarBody, CuentaBody } from '../shared/api'
+import type { ClasificarBody, ClasificarVariosBody, CuentaBody, ParteReparto } from '../shared/api'
 import { HttpError, mensajeError } from './http'
 import { urlDe } from './ruta'
 import { cabeceraSesion, claveConfigurada, claveCorrecta, emitirSesion, leerCookie, sesionValida } from './sesion'
@@ -78,6 +78,17 @@ export async function despachar(req: IncomingMessage, res: ServerResponse, svc: 
     send(res, 401, { error: 'Hace falta entrar' })
     return
   }
+  if (method === 'GET' && pathname === '/api/libro') {
+    const buf = svc.copiarLibro()
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-disposition': 'attachment; filename="extractos.sqlite"',
+      'cache-control': 'no-store',
+      'content-length': String(buf.length),
+    })
+    res.end(buf)
+    return
+  }
   if (method === 'GET' && pathname === '/api/resumen') return send(res, 200, svc.resumen())
   if (method === 'POST' && pathname === '/api/importar') return send(res, 200, await svc.importar())
   if (method === 'POST' && pathname === '/api/subir') {
@@ -91,6 +102,19 @@ export async function despachar(req: IncomingMessage, res: ServerResponse, svc: 
       cuentaId: url.searchParams.get('cuentaId') || undefined,
       q: url.searchParams.get('q') || undefined,
     }))
+  }
+  if (method === 'POST' && pathname === '/api/movimientos') {
+    await svc.clasificarVarios(await leerJson<ClasificarVariosBody>(req))
+    return send(res, 200, { ok: true })
+  }
+  if (method === 'POST' && pathname === '/api/reglas/vista') {
+    return send(res, 200, svc.previsualizar(await leerJson<ClasificarBody>(req)))
+  }
+  const repartirId = param(pathname, /^\/api\/movimientos\/([^/]+)\/repartir$/)
+  if (method === 'POST' && repartirId) {
+    const body = await leerJson<{ partes?: ParteReparto[] }>(req)
+    await svc.repartir(repartirId, body.partes ?? [])
+    return send(res, 200, { ok: true })
   }
   const movId = param(pathname, /^\/api\/movimientos\/([^/]+)$/)
   if (method === 'PATCH' && movId) {

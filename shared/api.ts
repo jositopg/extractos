@@ -21,6 +21,7 @@ export type CuentaJson = {
   fymValorCentimos: number | null
   diferenciaCentimos: number | null
   ultimoApunte: { fecha: string; concepto: string; importeCentimos: number; eseDia: number } | null
+  pendientes: number
 }
 
 export type PropiedadJson = {
@@ -72,6 +73,31 @@ export type ResumenJson = {
   nube: boolean
 }
 
+export type SugerenciaJson = {
+  destino: Destino
+  categoriaFinca: string | null
+  propiedadId: string | null
+  propiedadNombre: string | null
+  categoriaPersonal: string | null
+  patron: string
+}
+
+export type TraspasoSugeridoJson = {
+  id: string
+  cuentaNombre: string
+  fecha: string
+  importeCentimos: number
+}
+
+export type RepartoJson = {
+  id: string
+  propiedadId: string
+  propiedadNombre: string | null
+  categoriaFinca: string
+  importeCentimos: number
+  fincaError: string | null
+}
+
 export type MovimientoJson = {
   id: string
   cuentaId: string
@@ -89,6 +115,9 @@ export type MovimientoJson = {
   exportadoFincaEn: string | null
   fincaSincronizadoEn: string | null
   fincaError: string | null
+  sugerencia: SugerenciaJson | null
+  traspasoSugerido: TraspasoSugeridoJson | null
+  repartos: RepartoJson[]
 }
 
 export type RegistroJson = {
@@ -102,6 +131,7 @@ export type RegistroJson = {
   pendientes: number
   descuadres: { archivoId: string; nombre: string; cuentaNombre: string; diferenciaCentimos: number }[]
   historial: HistorialSaldo[]
+  avisos: string[]
 }
 
 export type EstadoFincaJson = {
@@ -147,6 +177,24 @@ export type ClasificarBody = {
   recordar?: boolean
   patron?: string
 }
+
+export type ClasificarVariosBody = ClasificarBody & { ids: string[] }
+
+export type ParteReparto = {
+  propiedadId: string
+  categoriaFinca: string
+  importeCentimos: number
+}
+
+export type CoincidenciaJson = {
+  id: string
+  fecha: string
+  concepto: string
+  importeCentimos: number
+  cuentaNombre: string
+}
+
+export type VistaReglaJson = { coincidencias: CoincidenciaJson[] }
 
 export type CuentaBody = {
   nombre?: string

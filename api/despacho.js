@@ -2,11 +2,13 @@
 
 // server/nube.ts
 import { mkdirSync as mkdirSync4 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 
 // server/db.ts
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 // shared/categorias.ts
@@ -63,7 +65,7 @@ var CATEGORIAS_INGRESO_PERSONAL = [
   "Otros ingresos"
 ];
 var CATEGORIAS_PERSONAL_FUERA_DE_VIDA = ["Ahorro e inversi\xF3n", "Devoluci\xF3n de deuda"];
-var DESTINOS = ["pendiente", "finca", "personal", "traspaso", "ignorar"];
+var DESTINOS = ["pendiente", "duda", "finca", "personal", "traspaso", "ignorar"];
 var TIPOS_CUENTA = ["corriente", "ahorro", "remunerada", "nomina", "otro"];
 var TIPOS_CUENTA_BANCARIA = ["corriente", "ahorro", "remunerada", "nomina"];
 function esCuentaBancaria(tipo) {
@@ -267,7 +269,21 @@ CREATE TABLE IF NOT EXISTS movimientos (
   finca_tx_id TEXT,
   finca_sincronizado_en TEXT,
   finca_error TEXT,
-  finca_firma TEXT
+  finca_firma TEXT,
+  ordinal_clave INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS repartos (
+  id TEXT PRIMARY KEY,
+  movimiento_id TEXT NOT NULL,
+  propiedad_id TEXT NOT NULL,
+  categoria_finca TEXT NOT NULL,
+  importe_centimos INTEGER NOT NULL,
+  finca_tx_id TEXT,
+  finca_firma TEXT,
+  finca_error TEXT,
+  finca_sincronizado_en TEXT,
+  vigente INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS reglas (
@@ -290,6 +306,7 @@ CREATE TABLE IF NOT EXISTS ficheros (
 CREATE INDEX IF NOT EXISTS idx_arch_hash ON archivos(contenido_hash);
 CREATE INDEX IF NOT EXISTS idx_mov_cuenta ON movimientos(cuenta_id, fecha);
 CREATE INDEX IF NOT EXISTS idx_mov_destino ON movimientos(destino);
+CREATE INDEX IF NOT EXISTS idx_reparto_mov ON repartos(movimiento_id);
 `;
 function openDb(path, opciones) {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -303,6 +320,7 @@ function openDb(path, opciones) {
   asegurarColumna(db, "movimientos", "finca_sincronizado_en", "finca_sincronizado_en TEXT");
   asegurarColumna(db, "movimientos", "finca_error", "finca_error TEXT");
   asegurarColumna(db, "movimientos", "finca_firma", "finca_firma TEXT");
+  asegurarColumna(db, "movimientos", "ordinal_clave", "ordinal_clave INTEGER");
   return db;
 }
 function asegurarColumna(db, tabla, columna, definicion) {
@@ -572,7 +590,17 @@ function hayMovimientoPorSaldo(db, cuentaId, fecha, importeCentimos, saldoCentim
   ) != null;
 }
 function deleteMovimientosArchivo(db, archivoId) {
+  db.prepare(
+    "DELETE FROM repartos WHERE movimiento_id IN (SELECT id FROM movimientos WHERE archivo_id = ?)"
+  ).run(archivoId);
   db.prepare("DELETE FROM movimientos WHERE archivo_id = ?").run(archivoId);
+}
+function listMovimientosArchivo(db, archivoId) {
+  return all(
+    db,
+    "SELECT * FROM movimientos WHERE archivo_id = ? ORDER BY orden ASC, id ASC",
+    archivoId
+  );
 }
 function deleteArchivo(db, id) {
   db.prepare("DELETE FROM archivos WHERE id = ?").run(id);
@@ -584,8 +612,8 @@ function insertMovimiento(db, row) {
   db.prepare(
     `INSERT INTO movimientos (
       id, cuenta_id, archivo_id, orden, fecha, fecha_valor, importe_centimos, saldo_centimos, concepto, documento,
-      destino, categoria_finca, propiedad_id, categoria_personal, nota, regla_id, clasificado_en
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      destino, categoria_finca, propiedad_id, categoria_personal, nota, regla_id, clasificado_en, ordinal_clave
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.cuentaId,
@@ -603,7 +631,8 @@ function insertMovimiento(db, row) {
     row.categoriaPersonal,
     row.nota,
     row.reglaId,
-    row.clasificadoEn
+    row.clasificadoEn,
+    row.ordinalClave
   );
 }
 function getMovimiento(db, id) {
@@ -614,6 +643,22 @@ function getMovimiento(db, id) {
   );
 }
 function listMovimientos(db, filtro) {
+  const cuenta = filtro.cuentaId ?? null;
+  if (filtro.destinos && filtro.destinos.length > 0) {
+    const marks = filtro.destinos.map(() => "?").join(", ");
+    return all(
+      db,
+      `SELECT m.*, c.nombre AS cuenta_nombre
+       FROM movimientos m JOIN cuentas c ON c.id = m.cuenta_id
+       WHERE m.destino IN (${marks}) AND (? IS NULL OR m.cuenta_id = ?)
+       ORDER BY m.fecha DESC, m.orden DESC
+       LIMIT ?`,
+      ...filtro.destinos,
+      cuenta,
+      cuenta,
+      filtro.limit
+    );
+  }
   return all(
     db,
     `SELECT m.*, c.nombre AS cuenta_nombre
@@ -623,8 +668,8 @@ function listMovimientos(db, filtro) {
      LIMIT ?`,
     filtro.destino ?? null,
     filtro.destino ?? null,
-    filtro.cuentaId ?? null,
-    filtro.cuentaId ?? null,
+    cuenta,
+    cuenta,
     filtro.limit
   );
 }
@@ -658,15 +703,39 @@ function updateClasificacion(db, row) {
 function listCandidatosFinca(db) {
   return all(
     db,
-    `SELECT * FROM movimientos WHERE destino = 'finca' OR finca_tx_id IS NOT NULL`
+    `SELECT * FROM movimientos
+     WHERE destino = 'finca'
+        OR finca_tx_id IS NOT NULL
+        OR id IN (SELECT movimiento_id FROM repartos WHERE finca_tx_id IS NOT NULL OR vigente = 0)`
   );
 }
 function listFincaDeArchivo(db, archivoId) {
-  return all(
+  const movs = all(
     db,
     `SELECT id, finca_tx_id FROM movimientos WHERE archivo_id = ? AND finca_tx_id IS NOT NULL`,
     archivoId
   );
+  const partes = all(
+    db,
+    `SELECT r.id, r.movimiento_id, r.finca_tx_id
+     FROM repartos r JOIN movimientos m ON m.id = r.movimiento_id
+     WHERE m.archivo_id = ? AND r.finca_tx_id IS NOT NULL`,
+    archivoId
+  );
+  return [
+    ...movs.map((m) => ({
+      movimientoId: m.id,
+      repartoId: null,
+      finca_tx_id: m.finca_tx_id,
+      referencia: `extractos:${m.id}`
+    })),
+    ...partes.map((p) => ({
+      movimientoId: p.movimiento_id,
+      repartoId: p.id,
+      finca_tx_id: p.finca_tx_id,
+      referencia: `extractos:${p.movimiento_id}:${p.id}`
+    }))
+  ];
 }
 function marcarFincaOk(db, id, txId, firma, cuando) {
   db.prepare(
@@ -679,6 +748,46 @@ function marcarFincaError(db, id, error) {
 function limpiarFinca(db, id) {
   db.prepare(
     `UPDATE movimientos SET finca_tx_id = NULL, finca_sincronizado_en = NULL, finca_error = NULL, finca_firma = NULL WHERE id = ?`
+  ).run(id);
+}
+function marcarContenedorOk(db, id, cuando) {
+  db.prepare(
+    `UPDATE movimientos SET finca_sincronizado_en = ?, finca_error = NULL, finca_firma = NULL WHERE id = ? AND finca_tx_id IS NULL`
+  ).run(cuando, id);
+}
+function listRepartos(db, movimientoId) {
+  if (movimientoId) return all(db, "SELECT * FROM repartos WHERE movimiento_id = ? ORDER BY id", movimientoId);
+  return all(db, "SELECT * FROM repartos ORDER BY movimiento_id, id");
+}
+function insertReparto(db, row) {
+  db.prepare(
+    `INSERT INTO repartos (id, movimiento_id, propiedad_id, categoria_finca, importe_centimos, vigente)
+     VALUES (?, ?, ?, ?, ?, 1)`
+  ).run(row.id, row.movimientoId, row.propiedadId, row.categoriaFinca, row.importeCentimos);
+}
+function obsoletarRepartos(db, movimientoId) {
+  db.prepare("UPDATE repartos SET vigente = 0 WHERE movimiento_id = ? AND vigente = 1").run(movimientoId);
+}
+function deleteReparto(db, id) {
+  db.prepare("DELETE FROM repartos WHERE id = ?").run(id);
+}
+function deleteRepartosMovimiento(db, movimientoId) {
+  db.prepare("DELETE FROM repartos WHERE movimiento_id = ?").run(movimientoId);
+}
+function moverRepartos(db, desdeId, haciaId) {
+  db.prepare("UPDATE repartos SET movimiento_id = ? WHERE movimiento_id = ?").run(haciaId, desdeId);
+}
+function marcarRepartoOk(db, id, txId, firma, cuando) {
+  db.prepare(
+    `UPDATE repartos SET finca_tx_id = ?, finca_sincronizado_en = ?, finca_error = NULL, finca_firma = ? WHERE id = ?`
+  ).run(txId, cuando, firma, id);
+}
+function marcarRepartoError(db, id, error) {
+  db.prepare("UPDATE repartos SET finca_error = ? WHERE id = ?").run(error, id);
+}
+function limpiarReparto(db, id) {
+  db.prepare(
+    `UPDATE repartos SET finca_tx_id = NULL, finca_sincronizado_en = NULL, finca_error = NULL, finca_firma = NULL WHERE id = ?`
   ).run(id);
 }
 function estadoFinca(db) {
@@ -743,7 +852,7 @@ function recuento(db) {
   let pendiente = 0;
   let clasificado = 0;
   for (const row of rows) {
-    if (row.destino === "pendiente") pendiente += row.c;
+    if (row.destino === "pendiente" || row.destino === "duda") pendiente += row.c;
     else clasificado += row.c;
   }
   return { pendiente, clasificado };
@@ -753,6 +862,19 @@ function destinoDe(row) {
 }
 function tipoDe(row) {
   return esTipoCuenta(row.tipo) ? row.tipo : "otro";
+}
+function copiarLibro(db) {
+  const path = join(tmpdir(), `extractos-copia-${randomUUID()}.sqlite`);
+  const sqlPath = path.replaceAll("'", "''");
+  try {
+    db.exec(`VACUUM INTO '${sqlPath}'`);
+    return readFileSync(path);
+  } finally {
+    try {
+      unlinkSync(path);
+    } catch {
+    }
+  }
 }
 
 // server/http.ts
@@ -911,6 +1033,17 @@ async function despachar(req, res, svc) {
     send(res, 401, { error: "Hace falta entrar" });
     return;
   }
+  if (method === "GET" && pathname === "/api/libro") {
+    const buf = svc.copiarLibro();
+    res.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-disposition": 'attachment; filename="extractos.sqlite"',
+      "cache-control": "no-store",
+      "content-length": String(buf.length)
+    });
+    res.end(buf);
+    return;
+  }
   if (method === "GET" && pathname === "/api/resumen") return send(res, 200, svc.resumen());
   if (method === "POST" && pathname === "/api/importar") return send(res, 200, await svc.importar());
   if (method === "POST" && pathname === "/api/subir") {
@@ -924,6 +1057,19 @@ async function despachar(req, res, svc) {
       cuentaId: url.searchParams.get("cuentaId") || void 0,
       q: url.searchParams.get("q") || void 0
     }));
+  }
+  if (method === "POST" && pathname === "/api/movimientos") {
+    await svc.clasificarVarios(await leerJson(req));
+    return send(res, 200, { ok: true });
+  }
+  if (method === "POST" && pathname === "/api/reglas/vista") {
+    return send(res, 200, svc.previsualizar(await leerJson(req)));
+  }
+  const repartirId = param(pathname, /^\/api\/movimientos\/([^/]+)\/repartir$/);
+  if (method === "POST" && repartirId) {
+    const body = await leerJson(req);
+    await svc.repartir(repartirId, body.partes ?? []);
+    return send(res, 200, { ok: true });
   }
   const movId = param(pathname, /^\/api\/movimientos\/([^/]+)$/);
   if (method === "PATCH" && movId) {
@@ -992,7 +1138,7 @@ function responderError(res, err) {
 
 // server/finca.ts
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join as join2 } from "node:path";
 import { Client } from "pg";
 
 // shared/finca.ts
@@ -1061,7 +1207,7 @@ function identificarBloques(contenidoHash, bloques) {
 }
 
 // server/pgurl.ts
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync as readFileSync2 } from "node:fs";
 function urlAplicacion(envName, archivo) {
   const directa = process.env[envName]?.trim();
   if (directa) return directa;
@@ -1069,7 +1215,7 @@ function urlAplicacion(envName, archivo) {
 }
 function leerDatabaseUrl(filePath) {
   if (!existsSync(filePath)) return null;
-  for (const line of readFileSync(filePath, "utf8").split("\n")) {
+  for (const line of readFileSync2(filePath, "utf8").split("\n")) {
     const m = /^DATABASE_URL=(.*)$/.exec(line.trim());
     if (m) return m[1].trim().replace(/^['"]|['"]$/g, "");
   }
@@ -1118,7 +1264,7 @@ RETURNING id
 `;
 var urlQueFunciono = null;
 async function conFinca(fn) {
-  const raw = urlAplicacion("FINCA_DATABASE_URL", join(homedir(), ".finca-db.env"));
+  const raw = urlAplicacion("FINCA_DATABASE_URL", join2(homedir(), ".finca-db.env"));
   if (!raw) throw new Error("No est\xE1 ~/.finca-db.env, as\xED que el apunte se queda en este libro.");
   const todas = fincaUrlsToTry(raw);
   const urls = urlQueFunciono ? [urlQueFunciono, ...todas.filter((u) => u !== urlQueFunciono)] : todas;
@@ -1193,21 +1339,87 @@ function escritorFincaReal() {
     }
   };
 }
+function filaDeParte(row, parte) {
+  const clave = `${row.id}:${parte.id}`;
+  return filaFinca({
+    id: uuidEstable(`extractos:${clave}`),
+    movimientoId: clave,
+    propiedadId: parte.propiedad_id,
+    fecha: row.fecha,
+    importeCentimos: parte.importe_centimos,
+    categoria: parte.categoria_finca,
+    concepto: row.concepto
+  });
+}
+function prepararParte(db, row, parte, upserts, firmaDe) {
+  if (propiedadLocal(parte.propiedad_id)) {
+    const msg = "Esta propiedad est\xE1 solo en este libro. Trae las de Finca para escribir el apunte.";
+    marcarRepartoError(db, parte.id, msg);
+    marcarFincaError(db, row.id, msg);
+    return;
+  }
+  const fila = filaDeParte(row, parte);
+  const firma = firmaFila(fila);
+  if (parte.finca_tx_id && parte.finca_firma === firma && !parte.finca_error) return;
+  upserts.push({ fila, movimientoId: row.id, repartoId: parte.id });
+  firmaDe.set(fila.id, firma);
+}
 async function sincronizarFinca(db, escritor) {
   if (!escritor) return { escritos: 0, borrados: 0, errores: estadoFinca(db).errores.length };
   const upserts = [];
   const borrados = [];
   const firmaDe = /* @__PURE__ */ new Map();
-  const movimientoDeFila = /* @__PURE__ */ new Map();
+  const contenedores = /* @__PURE__ */ new Set();
   for (const row of listCandidatosFinca(db)) {
+    const partes = listRepartos(db, row.id);
+    const vivas = partes.filter((p) => Number(p.vigente) === 1);
+    const muertas = partes.filter((p) => Number(p.vigente) !== 1);
     if (row.destino !== "finca") {
       if (row.finca_tx_id) {
         borrados.push({
           id: row.finca_tx_id,
           referencia: `extractos:${row.id}`,
-          movimientoId: row.id
+          movimientoId: row.id,
+          repartoId: null,
+          quitarFila: false
         });
       }
+      for (const parte of partes) {
+        if (parte.finca_tx_id) {
+          borrados.push({
+            id: parte.finca_tx_id,
+            referencia: `extractos:${row.id}:${parte.id}`,
+            movimientoId: row.id,
+            repartoId: parte.id,
+            quitarFila: true
+          });
+        } else deleteReparto(db, parte.id);
+      }
+      continue;
+    }
+    for (const parte of muertas) {
+      if (parte.finca_tx_id) {
+        borrados.push({
+          id: parte.finca_tx_id,
+          referencia: `extractos:${row.id}:${parte.id}`,
+          movimientoId: row.id,
+          repartoId: parte.id,
+          quitarFila: true
+        });
+      } else deleteReparto(db, parte.id);
+    }
+    if (vivas.length > 0) {
+      contenedores.add(row.id);
+      if (row.finca_tx_id) {
+        borrados.push({
+          id: row.finca_tx_id,
+          referencia: `extractos:${row.id}`,
+          movimientoId: row.id,
+          repartoId: null,
+          quitarFila: false
+        });
+      }
+      for (const parte of vivas) prepararParte(db, row, parte, upserts, firmaDe);
       continue;
     }
     if (!row.categoria_finca || !row.propiedad_id) {
@@ -1229,67 +1441,99 @@ async function sincronizarFinca(db, escritor) {
     });
     const firma = firmaFila(fila);
     if (row.finca_tx_id && row.finca_firma === firma && !row.finca_error) continue;
-    upserts.push(fila);
+    upserts.push({ fila, movimientoId: row.id, repartoId: null });
     firmaDe.set(fila.id, firma);
-    movimientoDeFila.set(fila.id, row.id);
   }
+  const ahora = (/* @__PURE__ */ new Date()).toISOString();
   if (upserts.length === 0 && borrados.length === 0) {
+    for (const id of contenedores) cerrarContenedor(db, id, ahora);
     return { escritos: 0, borrados: 0, errores: estadoFinca(db).errores.length };
   }
   let resultado;
   try {
     resultado = await escritor.aplicar({
-      upserts,
+      upserts: upserts.map((u) => u.fila),
       borrados: borrados.map(({ id, referencia }) => ({ id, referencia }))
     });
   } catch (err) {
     const msg = mensajeError(err);
-    for (const fila of upserts) {
-      const movId = movimientoDeFila.get(fila.id);
-      if (movId) marcarFincaError(db, movId, msg);
+    for (const item of upserts) {
+      if (item.repartoId) marcarRepartoError(db, item.repartoId, msg);
+      marcarFincaError(db, item.movimientoId, msg);
     }
-    for (const b of borrados) marcarFincaError(db, b.movimientoId, msg);
+    for (const b of borrados) {
+      if (b.repartoId) marcarRepartoError(db, b.repartoId, msg);
+      marcarFincaError(db, b.movimientoId, msg);
+    }
     return { escritos: 0, borrados: 0, errores: estadoFinca(db).errores.length };
   }
   const fallos = new Map(resultado.fallos.map((f) => [f.id, f.error]));
   const confirmados = new Set(resultado.ok);
-  const ahora = (/* @__PURE__ */ new Date()).toISOString();
   let escritos = 0;
   let borradosOk = 0;
-  for (const fila of upserts) {
-    const movId = movimientoDeFila.get(fila.id);
-    if (!movId) continue;
-    const fallo = fallos.get(fila.id);
-    if (fallo) marcarFincaError(db, movId, fallo);
-    else if (confirmados.has(fila.id)) {
-      marcarFincaOk(db, movId, fila.id, firmaDe.get(fila.id) ?? firmaFila(fila), ahora);
+  for (const item of upserts) {
+    const fallo = fallos.get(item.fila.id);
+    if (fallo) {
+      if (item.repartoId) marcarRepartoError(db, item.repartoId, fallo);
+      marcarFincaError(db, item.movimientoId, fallo);
+    } else if (confirmados.has(item.fila.id)) {
+      const firma = firmaDe.get(item.fila.id) ?? firmaFila(item.fila);
+      if (item.repartoId) marcarRepartoOk(db, item.repartoId, item.fila.id, firma, ahora);
+      else marcarFincaOk(db, item.movimientoId, item.fila.id, firma, ahora);
       escritos += 1;
-    } else marcarFincaError(db, movId, "Finca no ha confirmado el apunte.");
+    } else {
+      const msg = "Finca no ha confirmado el apunte.";
+      if (item.repartoId) marcarRepartoError(db, item.repartoId, msg);
+      marcarFincaError(db, item.movimientoId, msg);
+    }
   }
   for (const b of borrados) {
     const fallo = fallos.get(b.id);
-    if (fallo) marcarFincaError(db, b.movimientoId, fallo);
-    else if (confirmados.has(b.id)) {
-      limpiarFinca(db, b.movimientoId);
+    if (fallo) {
+      if (b.repartoId) marcarRepartoError(db, b.repartoId, fallo);
+      marcarFincaError(db, b.movimientoId, fallo);
+    } else if (confirmados.has(b.id)) {
+      if (b.repartoId && b.quitarFila) deleteReparto(db, b.repartoId);
+      else if (b.repartoId) limpiarReparto(db, b.repartoId);
+      else limpiarFinca(db, b.movimientoId);
       borradosOk += 1;
-    } else marcarFincaError(db, b.movimientoId, "Finca no ha confirmado el borrado.");
+    } else {
+      const msg = "Finca no ha confirmado el borrado.";
+      if (b.repartoId) marcarRepartoError(db, b.repartoId, msg);
+      marcarFincaError(db, b.movimientoId, msg);
+    }
   }
+  for (const id of contenedores) cerrarContenedor(db, id, ahora);
   return { escritos, borrados: borradosOk, errores: estadoFinca(db).errores.length };
+}
+function cerrarContenedor(db, movimientoId, cuando) {
+  const mov = getMovimiento(db, movimientoId);
+  const vivas = listRepartos(db, movimientoId).filter((p) => Number(p.vigente) === 1);
+  if (!mov || mov.destino !== "finca" || vivas.length === 0 || mov.finca_tx_id) return;
+  const fallo = vivas.find((p) => p.finca_error);
+  if (fallo?.finca_error) {
+    marcarFincaError(db, movimientoId, fallo.finca_error);
+    return;
+  }
+  if (vivas.every((p) => p.finca_sincronizado_en && !p.finca_error)) marcarContenedorOk(db, movimientoId, cuando);
 }
 async function retirarArchivoDeFinca(db, escritor, archivoId) {
   const filas = listFincaDeArchivo(db, archivoId);
   if (filas.length === 0) return;
   const resultado = await escritor.aplicar({
     upserts: [],
-    borrados: filas.map((f) => ({ id: f.finca_tx_id, referencia: `extractos:${f.id}` }))
+    borrados: filas.map((f) => ({ id: f.finca_tx_id, referencia: f.referencia }))
   });
   if (resultado.fallos.length > 0) throw new HttpError(502, resultado.fallos[0]?.error ?? "Finca no ha borrado el apunte");
-  for (const fila of filas) limpiarFinca(db, fila.id);
+  for (const fila of filas) {
+    if (fila.repartoId) limpiarReparto(db, fila.repartoId);
+    else limpiarFinca(db, fila.movimientoId);
+  }
 }
 
 // server/libro.ts
 import { BlobAccessError, BlobNotFoundError, BlobStoreNotFoundError, get as get2, put } from "@vercel/blob";
-import { readFileSync as readFileSync2, rmSync, writeFileSync } from "node:fs";
+import { readFileSync as readFileSync3, rmSync, writeFileSync } from "node:fs";
 var PATHNAME = "libro/extractos.sqlite";
 var TMP = "/tmp/extractos-libro.sqlite";
 async function abrirLibroNube() {
@@ -1316,7 +1560,7 @@ async function abrirLibroNube() {
     cerrar: async (guardar) => {
       db.close();
       if (!guardar) return;
-      await put(PATHNAME, readFileSync2(TMP), {
+      await put(PATHNAME, readFileSync3(TMP), {
         access: "private",
         allowOverwrite: true,
         contentType: "application/octet-stream"
@@ -1327,8 +1571,53 @@ async function abrirLibroNube() {
 
 // server/servicio.ts
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join4 } from "node:path";
-import { randomUUID } from "node:crypto";
+import { join as join5 } from "node:path";
+import { randomUUID as randomUUID2 } from "node:crypto";
+
+// shared/avisos.ts
+function mesHaceUnAno(mes) {
+  const m = /^(\d{4})-(\d{2})$/.exec(mes);
+  if (!m) return null;
+  return `${Number(m[1]) - 1}-${m[2]}`;
+}
+function es(mov, propiedadId, categoria, mes, ingreso) {
+  if (mov.destino !== "finca" || mov.propiedadId !== propiedadId || mov.categoriaFinca !== categoria) return false;
+  if (mesDe(mov.fecha) !== mes) return false;
+  return ingreso ? mov.importeCentimos > 0 : mov.importeCentimos < 0;
+}
+function avisosDelMes(movs, mes, propiedades) {
+  const nombres = new Map(propiedades.map((p) => [p.id, p.nombre]));
+  const ids = /* @__PURE__ */ new Set();
+  for (const mov of movs) {
+    if (mov.propiedadId && nombres.has(mov.propiedadId)) ids.add(mov.propiedadId);
+  }
+  const avisos = [];
+  const anoPasado = mesHaceUnAno(mes);
+  const ordenados = [...ids].sort((a, b) => (nombres.get(a) ?? "").localeCompare(nombres.get(b) ?? "", "es"));
+  for (const id of ordenados) {
+    const nombre = nombres.get(id) ?? "una propiedad";
+    const cobroAntes = movs.some(
+      (mov) => mov.destino === "finca" && mov.propiedadId === id && mov.categoriaFinca === "Alquiler mensual" && mov.importeCentimos > 0 && mesDe(mov.fecha) < mes
+    );
+    const cobroAhora = movs.some((mov) => es(mov, id, "Alquiler mensual", mes, true));
+    if (cobroAntes && !cobroAhora) {
+      avisos.push(`En ${nombre} no veo el alquiler de este mes. En meses anteriores s\xED entr\xF3.`);
+    }
+    if (anoPasado) {
+      for (const categoria of ["IBI", "Comunidad de propietarios"]) {
+        const antes = movs.some((mov) => es(mov, id, categoria, anoPasado, false));
+        const ahora = movs.some((mov) => es(mov, id, categoria, mes, false));
+        if (antes && !ahora) avisos.push(`El a\xF1o pasado, este mes, ${nombre} tuvo ${categoria}. Este a\xF1o no lo veo.`);
+      }
+    }
+    const luz = movs.some((mov) => es(mov, id, "Electricidad", mes, false));
+    const repercutida = movs.some((mov) => es(mov, id, "Electricidad (repercutida)", mes, true));
+    if (luz && !repercutida) {
+      avisos.push(`En ${nombre} hay un cargo de electricidad y no veo la electricidad repercutida.`);
+    }
+  }
+  return avisos;
+}
 
 // shared/clasificar.ts
 function categoriasPara(destino, importeCentimos) {
@@ -1338,7 +1627,7 @@ function categoriasPara(destino, importeCentimos) {
 }
 function errorClasificacion(input) {
   const { destino, importeCentimos } = input;
-  if (destino === "pendiente" || destino === "traspaso" || destino === "ignorar") return null;
+  if (destino === "pendiente" || destino === "duda" || destino === "traspaso" || destino === "ignorar") return null;
   const categoria = destino === "finca" ? input.categoriaFinca : input.categoriaPersonal;
   if (!categoria) return "Falta la categor\xEDa";
   const validas = categoriasPara(destino, importeCentimos);
@@ -1480,7 +1769,7 @@ function informeMes(movs, mes) {
   let pendientes = 0;
   const grupos = /* @__PURE__ */ new Map();
   for (const m of delMes) {
-    if (m.destino === "pendiente") {
+    if (m.destino === "pendiente" || m.destino === "duda") {
       pendientes += 1;
       continue;
     }
@@ -1564,6 +1853,33 @@ function mediaGastoVida(movs, hoy) {
   return { mediaCentimos, meses: ultimos, aviso };
 }
 
+// shared/traspaso.ts
+var DIA = 864e5;
+function diasEntre(a, b) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(a) || !/^\d{4}-\d{2}-\d{2}$/.test(b)) return null;
+  const da = Date.parse(`${a}T00:00:00Z`);
+  const db = Date.parse(`${b}T00:00:00Z`);
+  if (Number.isNaN(da) || Number.isNaN(db)) return null;
+  return Math.abs(da - db) / DIA;
+}
+function sugerirTraspaso(mov, otros) {
+  if (mov.importeCentimos === 0) return null;
+  let mejor = null;
+  let mejorDias = Infinity;
+  for (const otro of otros) {
+    if (otro.id === mov.id || otro.cuentaId === mov.cuentaId) continue;
+    if (otro.importeCentimos !== -mov.importeCentimos) continue;
+    const dias = diasEntre(mov.fecha, otro.fecha);
+    if (dias == null || dias > 3) continue;
+    const gana = mejor == null || dias < mejorDias || dias === mejorDias && (otro.fecha < mejor.fecha || otro.fecha === mejor.fecha && otro.id < mejor.id);
+    if (gana) {
+      mejor = otro;
+      mejorDias = dias;
+    }
+  }
+  return mejor;
+}
+
 // shared/visto.ts
 function ultimoApunte(movs) {
   if (movs.length === 0) return null;
@@ -1602,7 +1918,7 @@ function hayHueco(vistoHasta, desde) {
 
 // server/catalogos.ts
 import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 import { Client as Client2 } from "pg";
 function centimosPg(value) {
   if (value == null) return null;
@@ -1648,7 +1964,7 @@ async function sincronizarCatalogos(db) {
   let propiedades = null;
   let fymCuentas = null;
   const ahora = (/* @__PURE__ */ new Date()).toISOString();
-  const fincaUrl = urlAplicacion("FINCA_DATABASE_URL", join2(homedir2(), ".finca-db.env"));
+  const fincaUrl = urlAplicacion("FINCA_DATABASE_URL", join3(homedir2(), ".finca-db.env"));
   if (!fincaUrl) {
     errores.push("No est\xE1 ~/.finca-db.env, as\xED que no puedo traer las propiedades.");
   } else {
@@ -1668,7 +1984,7 @@ async function sincronizarCatalogos(db) {
       errores.push(`Finca: ${mensajeError(err)}`);
     }
   }
-  const fymUrl = urlAplicacion("FYM_DATABASE_URL", join2(homedir2(), ".fuckyoumoney-db.env"));
+  const fymUrl = urlAplicacion("FYM_DATABASE_URL", join3(homedir2(), ".fuckyoumoney-db.env"));
   if (!fymUrl) {
     errores.push("No est\xE1 ~/.fuckyoumoney-db.env, as\xED que no puedo traer las cuentas.");
   } else {
@@ -1716,9 +2032,9 @@ async function sincronizarCatalogos(db) {
 }
 
 // server/importar.ts
-import { mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync3, unlinkSync, writeFileSync as writeFileSync2, existsSync as existsSync2, statSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join as join3, resolve, sep } from "node:path";
+import { mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2, existsSync as existsSync2, statSync } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join4, resolve, sep } from "node:path";
 
 // shared/asignar.ts
 function aliasEnNombre(alias, filename) {
@@ -2291,7 +2607,7 @@ var MAX_BYTES = 2e7;
 function asegurarCarpetas(rutas2) {
   mkdirSync2(rutas2.inbox, { recursive: true });
   mkdirSync2(rutas2.exportDir, { recursive: true });
-  mkdirSync2(join3(rutas2.root, "data"), { recursive: true });
+  mkdirSync2(join4(rutas2.root, "data"), { recursive: true });
 }
 function extension(nombre) {
   const i = nombre.lastIndexOf(".");
@@ -2307,7 +2623,7 @@ function dentro(dir, file) {
   const full = resolve(file);
   return full === root || full.startsWith(root + sep);
 }
-function reglasDominio(db) {
+function reglasDelLibro(db) {
   return listReglas(db).map((r) => ({
     id: r.id,
     patron: r.patron,
@@ -2347,6 +2663,51 @@ function aplicarRegla(db, reglas, concepto, importeCentimos) {
     reglaId: regla.id
   };
 }
+function sugerirMovimiento(db, reglas, concepto, importeCentimos) {
+  const clas = aplicarRegla(db, reglas, concepto, importeCentimos);
+  if (clas.destino === "pendiente" || !clas.reglaId) return null;
+  const regla = reglas.find((r) => r.id === clas.reglaId);
+  return {
+    destino: clas.destino,
+    categoriaFinca: clas.categoriaFinca,
+    propiedadId: clas.propiedadId,
+    propiedadNombre: clas.propiedadId ? getPropiedad(db, clas.propiedadId)?.nombre ?? null : null,
+    categoriaPersonal: clas.categoriaPersonal,
+    patron: regla?.patron ?? ""
+  };
+}
+function coincidenciasRegla(db, candidata) {
+  const patron = normalizar(candidata.patron);
+  const nueva = {
+    id: "nueva",
+    patron,
+    destino: candidata.destino,
+    categoriaFinca: candidata.categoriaFinca,
+    propiedadId: candidata.propiedadId,
+    categoriaPersonal: candidata.categoriaPersonal,
+    creadoEn: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const reglas = reglasDelLibro(db).filter((r) => normalizar(r.patron) !== patron);
+  reglas.push(nueva);
+  const rows = db.prepare(
+    `SELECT m.id, m.fecha, m.concepto, m.importe_centimos, c.nombre AS cuenta_nombre
+       FROM movimientos m JOIN cuentas c ON c.id = m.cuenta_id
+       WHERE m.destino = 'pendiente'`
+  ).all();
+  const coincidencias = [];
+  for (const mov of rows) {
+    const clas = aplicarRegla(db, reglas, mov.concepto, mov.importe_centimos);
+    if (clas.reglaId !== "nueva") continue;
+    coincidencias.push({
+      id: mov.id,
+      fecha: mov.fecha,
+      concepto: mov.concepto,
+      importeCentimos: mov.importe_centimos,
+      cuentaNombre: mov.cuenta_nombre
+    });
+  }
+  return coincidencias;
+}
 function apunteDeCuenta(db, cuentaId) {
   return ultimoApunte(
     listApuntesCuenta(db, cuentaId).map((row) => ({
@@ -2380,7 +2741,7 @@ function soltarBytesSiYaNoHacenFalta(db, hash) {
   const quedaSuelto = listArchivosHash(db, hash).some((row) => !row.error && !row.cuenta_id);
   if (!quedaSuelto) borrarFichero(db, hash);
 }
-function insertarMovimientos(db, cuentaId, archivoId, bloque, reglas, ahora) {
+function insertarMovimientos(db, cuentaId, archivoId, bloque) {
   const porSaldo = saldoIdentificaLinea(bloque.movimientos);
   const vistos = /* @__PURE__ */ new Map();
   let insertados = 0;
@@ -2405,7 +2766,6 @@ function insertarMovimientos(db, cuentaId, archivoId, bloque, reglas, ahora) {
       duplicados += 1;
       continue;
     }
-    const clas = aplicarRegla(db, reglas, mov.concepto, mov.importeCentimos);
     insertMovimiento(db, {
       id,
       cuentaId,
@@ -2417,13 +2777,14 @@ function insertarMovimientos(db, cuentaId, archivoId, bloque, reglas, ahora) {
       saldoCentimos: mov.saldoCentimos ?? null,
       concepto: mov.concepto,
       documento: mov.documento ?? "",
-      destino: clas.destino,
-      categoriaFinca: clas.categoriaFinca,
-      propiedadId: clas.propiedadId,
-      categoriaPersonal: clas.categoriaPersonal,
+      destino: "pendiente",
+      categoriaFinca: null,
+      propiedadId: null,
+      categoriaPersonal: null,
       nota: "",
-      reglaId: clas.reglaId,
-      clasificadoEn: clas.destino === "pendiente" ? null : ahora
+      reglaId: null,
+      clasificadoEn: null,
+      ordinalClave: ordinal
     });
     insertados += 1;
   }
@@ -2474,24 +2835,24 @@ async function parseBuf(nombre, buf, path) {
   if (EXT_HOJA.has(ext)) return parseHoja(buf);
   if (ext === "pdf") {
     if (path) return parseExtracto(await textoPdf(path, buf));
-    const tmp = join3(tmpdir(), `extractos-${sha256(buf).slice(0, 12)}.pdf`);
+    const tmp = join4(tmpdir2(), `extractos-${sha256(buf).slice(0, 12)}.pdf`);
     writeFileSync2(tmp, buf);
     try {
       return parseExtracto(await textoPdf(tmp, buf));
     } finally {
       try {
-        unlinkSync(tmp);
+        unlinkSync2(tmp);
       } catch {
       }
     }
   }
   return parseExtracto(decodeTextoBanco(buf));
 }
-function volcarBloque(db, cuentaId, archivoId, bloque, reglas, ahora, avisosPrevios) {
+function volcarBloque(db, cuentaId, archivoId, bloque, avisosPrevios) {
   const antes = apunteDeCuenta(db, cuentaId);
   const hueco = textoHueco(db, cuentaId, bloque.desde);
   const avisos = [avisosPrevios, hueco].filter(Boolean).join("\n");
-  const volcado = insertarMovimientos(db, cuentaId, archivoId, bloque, reglas, ahora);
+  const volcado = insertarMovimientos(db, cuentaId, archivoId, bloque);
   updateArchivoCuenta(db, archivoId, {
     cuentaId,
     movimientos: volcado.insertados,
@@ -2515,10 +2876,8 @@ async function reengancharSueltos(db, nombre, hash, buf, sueltos) {
     parcial.errores.push({ nombre, error: parsed.error });
     return parcial;
   }
-  const reglas = reglasDominio(db);
   const cuentas = cuentasPista(db);
   const bloques = identificarBloques(hash, parsed.bloques);
-  const ahora = (/* @__PURE__ */ new Date()).toISOString();
   db.exec("BEGIN");
   try {
     guardarFichero(db, hash, nombre, buf);
@@ -2532,7 +2891,7 @@ async function reengancharSueltos(db, nombre, hash, buf, sueltos) {
         parcial.notas.push(notaSinCuenta(archivo.nombre, bloque.movimientos.length));
         continue;
       }
-      const volcado = volcarBloque(db, cuentaId, archivo.id, bloque, reglas, ahora, archivo.avisos);
+      const volcado = volcarBloque(db, cuentaId, archivo.id, bloque, archivo.avisos);
       parcial.movimientos += volcado.insertados;
       parcial.duplicados += volcado.duplicados;
       parcial.notas.push(
@@ -2572,7 +2931,7 @@ async function importarInbox(db, rutas2) {
   };
   const nombres = readdirSync(rutas2.inbox).filter((n) => !n.startsWith("."));
   for (const nombre of nombres) {
-    const path = join3(rutas2.inbox, nombre);
+    const path = join4(rutas2.inbox, nombre);
     let st;
     try {
       st = statSync(path);
@@ -2587,7 +2946,7 @@ async function importarInbox(db, rutas2) {
       resultado.errores.push({ nombre, error: "Pasa de 20 MB" });
       continue;
     }
-    const buf = readFileSync3(path);
+    const buf = readFileSync4(path);
     const hash = sha256(buf);
     if (hayHash(db, hash) && !olvidarLecturaFallida(db, hash)) {
       const sueltos = listArchivosHash(db, hash).filter((row) => !row.error && !row.cuenta_id && Number(row.movimientos) === 0);
@@ -2656,7 +3015,6 @@ async function importarInbox(db, rutas2) {
       resultado.errores.push({ nombre, error: parsed.error });
       continue;
     }
-    const reglas = reglasDominio(db);
     const cuentas = cuentasPista(db);
     const bloques = identificarBloques(hash, parsed.bloques);
     db.exec("BEGIN");
@@ -2690,7 +3048,7 @@ async function importarInbox(db, rutas2) {
           resultado.notas.push(notaSinCuenta(nombre, bloque.movimientos.length));
           continue;
         }
-        const volcado = volcarBloque(db, cuentaId, bloque.id, bloque, reglas, ahora, avisosPrevios);
+        const volcado = volcarBloque(db, cuentaId, bloque.id, bloque, avisosPrevios);
         resultado.movimientos += volcado.insertados;
         resultado.duplicados += volcado.duplicados;
         resultado.notas.push(
@@ -2729,15 +3087,15 @@ function bufDelExtracto(db, rutas2, nombre, hash) {
   }
 }
 function leerPorHash(rutas2, nombre, hash) {
-  const directo = join3(rutas2.inbox, nombre);
+  const directo = join4(rutas2.inbox, nombre);
   if (existsSync2(directo)) {
-    const buf = readFileSync3(directo);
+    const buf = readFileSync4(directo);
     if (sha256(buf) === hash) return { buf, path: directo };
   }
   for (const entry of readdirSync(rutas2.inbox)) {
-    const path = join3(rutas2.inbox, entry);
+    const path = join4(rutas2.inbox, entry);
     if (!statSync(path).isFile()) continue;
-    const buf = readFileSync3(path);
+    const buf = readFileSync4(path);
     if (sha256(buf) === hash) return { buf, path };
   }
   throw new HttpError(400, "Ya no est\xE1 el fichero en la carpeta inbox");
@@ -2753,11 +3111,9 @@ async function asignarArchivo(db, rutas2, archivoId, cuentaId) {
   if (!parsed.ok) throw new HttpError(400, parsed.error);
   const bloque = identificarBloques(archivo.contenido_hash, parsed.bloques).find((b) => b.id === archivoId);
   if (!bloque) throw new HttpError(400, "No encuentro ese bloque en el fichero");
-  const ahora = (/* @__PURE__ */ new Date()).toISOString();
-  const reglas = reglasDominio(db);
   db.exec("BEGIN");
   try {
-    volcarBloque(db, cuentaId, archivoId, bloque, reglas, ahora, archivo.avisos);
+    volcarBloque(db, cuentaId, archivoId, bloque, archivo.avisos);
     soltarBytesSiYaNoHacenFalta(db, archivo.contenido_hash);
     db.exec("COMMIT");
   } catch (err) {
@@ -2784,10 +3140,9 @@ async function engancharPendientes(db, cuentaId) {
     if (!bloque) continue;
     const eleccion = elegirCuenta(bloque, archivo.nombre, cuentas);
     if (!eleccion || !("id" in eleccion)) continue;
-    const ahora = (/* @__PURE__ */ new Date()).toISOString();
     db.exec("BEGIN");
     try {
-      const volcado = volcarBloque(db, eleccion.id, archivo.id, bloque, reglasDominio(db), ahora, archivo.avisos);
+      const volcado = volcarBloque(db, eleccion.id, archivo.id, bloque, archivo.avisos);
       soltarBytesSiYaNoHacenFalta(db, archivo.contenido_hash);
       db.exec("COMMIT");
       movimientos += volcado.insertados;
@@ -2815,10 +3170,10 @@ function borrarArchivo(db, rutas2, archivoId) {
   }
   if (contarArchivosHash(db, hash) > 0) return;
   borrarFichero(db, hash);
-  const directo = join3(rutas2.inbox, nombre);
+  const directo = join4(rutas2.inbox, nombre);
   if (existsSync2(directo)) {
     try {
-      if (sha256(readFileSync3(directo)) === hash) unlinkSync(directo);
+      if (sha256(readFileSync4(directo)) === hash) unlinkSync2(directo);
     } catch {
     }
   }
@@ -2831,17 +3186,81 @@ function guardarSubida(rutas2, nombre, buf) {
   const punto = seguro.lastIndexOf(".");
   const base = punto > 0 ? seguro.slice(0, punto) : seguro;
   const ext = punto > 0 ? seguro.slice(punto) : "";
-  let candidato = join3(rutas2.inbox, seguro);
+  let candidato = join4(rutas2.inbox, seguro);
   if (!dentro(rutas2.inbox, candidato)) throw new HttpError(400, "Nombre de fichero no v\xE1lido");
   for (let i = 2; existsSync2(candidato) && i < 1e3; i++) {
-    candidato = join3(rutas2.inbox, `${base}-${i}${ext}`);
+    candidato = join4(rutas2.inbox, `${base}-${i}${ext}`);
   }
   if (existsSync2(candidato)) throw new HttpError(400, "Demasiados ficheros con el mismo nombre");
   writeFileSync2(candidato, buf);
   return candidato;
 }
+function claveIban(valor) {
+  return valor.replace(/\s/g, "").toUpperCase();
+}
+function moverArchivo(db, archivoId, cuentaId) {
+  const archivo = getArchivo(db, archivoId);
+  if (!archivo) throw new HttpError(404, "No encuentro ese extracto");
+  if (!archivo.cuenta_id) throw new HttpError(400, "Este extracto todav\xEDa no tiene cuenta");
+  if (archivo.cuenta_id === cuentaId) return;
+  const destino = getCuenta(db, cuentaId);
+  if (!destino) throw new HttpError(400, "No encuentro esa cuenta");
+  const origen = getCuenta(db, archivo.cuenta_id);
+  const movs = listMovimientosArchivo(db, archivoId);
+  db.exec("BEGIN");
+  try {
+    const vistos = /* @__PURE__ */ new Map();
+    for (const mov of movs) {
+      const doc = (mov.documento ?? "").replace(/\D/g, "").replace(/^0+$/, "");
+      const clave = `${mov.fecha}|${mov.importe_centimos}|${normalizar(mov.concepto)}`;
+      let ordinal = mov.ordinal_clave;
+      if (ordinal == null) {
+        ordinal = doc ? 0 : vistos.get(clave) ?? 0;
+        if (!doc) vistos.set(clave, ordinal + 1);
+      }
+      const nuevoId = idMovimiento(cuentaId, {
+        fecha: mov.fecha,
+        importeCentimos: mov.importe_centimos,
+        concepto: mov.concepto,
+        documento: mov.documento,
+        ordinal
+      });
+      if (nuevoId !== mov.id && hayMovimiento(db, nuevoId)) {
+        deleteRepartosMovimiento(db, mov.id);
+        db.prepare("DELETE FROM movimientos WHERE id = ?").run(mov.id);
+        continue;
+      }
+      if (nuevoId !== mov.id) moverRepartos(db, mov.id, nuevoId);
+      db.prepare("UPDATE movimientos SET id = ?, cuenta_id = ?, ordinal_clave = ? WHERE id = ?").run(
+        nuevoId,
+        cuentaId,
+        ordinal,
+        mov.id
+      );
+    }
+    const quedan = db.prepare("SELECT COUNT(*) AS c FROM movimientos WHERE archivo_id = ?").get(archivoId);
+    db.prepare("UPDATE archivos SET cuenta_id = ?, movimientos = ? WHERE id = ?").run(cuentaId, Number(quedan.c), archivoId);
+    if (origen) {
+      const otros = listArchivos(db).filter((a) => a.id !== archivoId && a.cuenta_id === origen.id);
+      const ibanArchivo = claveIban(archivo.iban);
+      const cccArchivo = archivo.ccc.replace(/\D/g, "");
+      let iban = origen.iban;
+      let ccc = origen.ccc;
+      const otroIban = otros.some((a) => ibanArchivo && claveIban(a.iban) === ibanArchivo);
+      const otroCcc = otros.some((a) => cccArchivo && a.ccc.replace(/\D/g, "") === cccArchivo);
+      if (ibanArchivo && claveIban(origen.iban) === ibanArchivo && !otroIban) iban = "";
+      if (cccArchivo && origen.ccc.replace(/\D/g, "") === cccArchivo && !otroCcc) ccc = "";
+      if (iban !== origen.iban || ccc !== origen.ccc) updateCuenta(db, { ...origen, iban, ccc });
+    }
+    aprenderCuenta(db, cuentaId, { iban: archivo.iban, ccc: archivo.ccc });
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
 function aplicarReglasPendientes(db) {
-  const reglas = reglasDominio(db);
+  const reglas = reglasDelLibro(db);
   const pendientes = listPendientes(db);
   const ahora = (/* @__PURE__ */ new Date()).toISOString();
   let n = 0;
@@ -2873,6 +3292,12 @@ function cuentaJson(db, cuentas = listCuentas(db)) {
   const archivos = listArchivos(db);
   const movs = listMovimientosInforme(db);
   const fym = listFym(db);
+  const abiertosPorCuenta = /* @__PURE__ */ new Map();
+  for (const mov of movs) {
+    if (mov.destino === "pendiente" || mov.destino === "duda") {
+      abiertosPorCuenta.set(mov.cuenta_id, (abiertosPorCuenta.get(mov.cuenta_id) ?? 0) + 1);
+    }
+  }
   const porCuenta = /* @__PURE__ */ new Map();
   for (const mov of movs) {
     const lista = porCuenta.get(mov.cuenta_id) ?? [];
@@ -2924,11 +3349,12 @@ function cuentaJson(db, cuentas = listCuentas(db)) {
       fymNombre: enlace?.nombre ?? null,
       fymValorCentimos: enlace?.valor_centimos ?? null,
       diferenciaCentimos: diferencia,
-      ultimoApunte: ultimoApunte(porCuenta.get(c.id) ?? [])
+      ultimoApunte: ultimoApunte(porCuenta.get(c.id) ?? []),
+      pendientes: abiertosPorCuenta.get(c.id) ?? 0
     };
   });
 }
-function movJson(row) {
+function movJson(row, extra) {
   return {
     id: row.id,
     cuentaId: row.cuenta_id,
@@ -2945,8 +3371,75 @@ function movJson(row) {
     nota: row.nota,
     exportadoFincaEn: row.exportado_finca_en,
     fincaSincronizadoEn: row.finca_sincronizado_en,
-    fincaError: row.finca_error
+    fincaError: row.finca_error,
+    sugerencia: extra.sugerencia,
+    traspasoSugerido: extra.traspasoSugerido,
+    repartos: extra.repartos
   };
+}
+function prepararClasificacion(db, id, body) {
+  if (!esDestino(body.destino)) throw new HttpError(400, "Destino desconocido");
+  const mov = getMovimiento(db, id);
+  if (!mov) throw new HttpError(404, "No encuentro el movimiento");
+  const destino = body.destino;
+  const categoriaFinca = destino === "finca" ? body.categoriaFinca ?? null : null;
+  const propiedadId = destino === "finca" ? body.propiedadId ?? null : null;
+  const categoriaPersonal = destino === "personal" ? body.categoriaPersonal ?? null : null;
+  const error = errorClasificacion({
+    destino,
+    importeCentimos: mov.importe_centimos,
+    categoriaFinca,
+    propiedadId,
+    categoriaPersonal
+  });
+  if (error) throw new HttpError(400, error);
+  if (destino === "finca" && propiedadId && !getPropiedad(db, propiedadId)) {
+    throw new HttpError(400, "No tengo esa propiedad. Tr\xE1ela de Finca o a\xF1\xE1dela a mano.");
+  }
+  if (body.recordar && (destino === "pendiente" || destino === "duda")) {
+    throw new HttpError(400, "Elige un destino antes de recordar el concepto");
+  }
+  return { mov, destino, categoriaFinca, propiedadId, categoriaPersonal };
+}
+function guardarRegla(db, mov, listo, body) {
+  const patron = normalizar(body.patron || sugerirPatron(mov.concepto));
+  if (patron.length < 3) {
+    throw new HttpError(400, "El patr\xF3n es demasiado corto. Deja una palabra del concepto, por ejemplo endesa.");
+  }
+  return upsertRegla(db, {
+    id: randomUUID2(),
+    patron,
+    destino: listo.destino,
+    categoria_finca: listo.categoriaFinca,
+    propiedad_id: listo.propiedadId,
+    categoria_personal: listo.categoriaPersonal,
+    creado_en: (/* @__PURE__ */ new Date()).toISOString()
+  });
+}
+function escribirClasificacion(db, listo, body, reglaId) {
+  const abierto = listo.destino === "pendiente" || listo.destino === "duda";
+  obsoletarRepartos(db, listo.mov.id);
+  updateClasificacion(db, {
+    id: listo.mov.id,
+    destino: listo.destino,
+    categoriaFinca: listo.categoriaFinca,
+    propiedadId: listo.propiedadId,
+    categoriaPersonal: listo.categoriaPersonal,
+    nota: body.nota ?? listo.mov.nota,
+    reglaId,
+    clasificadoEn: abierto ? null : (/* @__PURE__ */ new Date()).toISOString(),
+    exportadoFincaEn: listo.mov.exportado_finca_en
+  });
+}
+function repartosVigentes(db) {
+  const mapa = /* @__PURE__ */ new Map();
+  for (const parte of listRepartos(db)) {
+    if (Number(parte.vigente) !== 1) continue;
+    const lista = mapa.get(parte.movimiento_id) ?? [];
+    lista.push(parte);
+    mapa.set(parte.movimiento_id, lista);
+  }
+  return mapa;
 }
 function informes(db) {
   return listMovimientosInforme(db).map((m) => ({
@@ -2958,8 +3451,28 @@ function informes(db) {
   }));
 }
 function armarExportacion(db, soloNuevos) {
-  const ficheros = exportarFinca(
-    listMovimientosFinca(db).map((m) => ({
+  const nombres = new Map(listPropiedades(db).map((p) => [p.id, p.nombre]));
+  const porMov = repartosVigentes(db);
+  const lineas = [];
+  for (const m of listMovimientosFinca(db)) {
+    const trozos = porMov.get(m.id) ?? [];
+    if (trozos.length > 0) {
+      for (const parte of trozos) {
+        lineas.push({
+          id: m.id,
+          fecha: m.fecha,
+          importeCentimos: parte.importe_centimos,
+          concepto: m.concepto,
+          destino: "finca",
+          categoriaFinca: parte.categoria_finca,
+          propiedadId: parte.propiedad_id,
+          propiedadNombre: nombres.get(parte.propiedad_id) ?? null,
+          exportadoFincaEn: m.exportado_finca_en
+        });
+      }
+      continue;
+    }
+    lineas.push({
       id: m.id,
       fecha: m.fecha,
       importeCentimos: m.importe_centimos,
@@ -2969,9 +3482,9 @@ function armarExportacion(db, soloNuevos) {
       propiedadId: m.propiedad_id,
       propiedadNombre: m.propiedad_nombre,
       exportadoFincaEn: m.exportado_finca_en
-    })),
-    soloNuevos
-  );
+    });
+  }
+  const ficheros = exportarFinca(lineas, soloNuevos);
   const media = mediaGastoVida(informes(db), hoyLocal());
   const cuentas = cuentaJson(db).map((c) => ({
     nombre: c.nombre,
@@ -3056,71 +3569,208 @@ function crearServicio(db, rutas2, opciones = {}) {
       return resultado;
     },
     movimientos(filtro) {
-      const destino = filtro.destino && esDestino(filtro.destino) ? filtro.destino : null;
+      const abiertos = filtro.destino === "abiertos";
+      const destino = !abiertos && filtro.destino && esDestino(filtro.destino) ? filtro.destino : null;
       const q = normalizar(filtro.q ?? "");
-      const rows = listMovimientos(db, { destino, cuentaId: filtro.cuentaId || null, limit: q ? 2e3 : 500 });
-      return rows.filter((r) => !q || normalizar(`${r.concepto} ${r.nota}`).includes(q)).slice(0, 500).map(movJson);
+      const rows = listMovimientos(db, {
+        destino: abiertos ? null : destino,
+        destinos: abiertos ? ["pendiente", "duda"] : null,
+        cuentaId: filtro.cuentaId || null,
+        limit: q ? 2e3 : 500
+      }).filter((r) => !q || normalizar(`${r.concepto} ${r.nota}`).includes(q)).slice(0, 500);
+      const reglas = reglasDelLibro(db);
+      const nombres = new Map(listCuentas(db).map((c) => [c.id, c.nombre]));
+      const propiedades = new Map(listPropiedades(db).map((p) => [p.id, p.nombre]));
+      const candidatos = listMovimientosInforme(db).map((m) => ({
+        id: m.id,
+        cuentaId: m.cuenta_id,
+        fecha: m.fecha,
+        importeCentimos: m.importe_centimos,
+        cuentaNombre: nombres.get(m.cuenta_id) ?? ""
+      }));
+      const porMov = repartosVigentes(db);
+      return rows.map((row) => {
+        const abierto = row.destino === "pendiente" || row.destino === "duda";
+        const sugerida = abierto ? sugerirMovimiento(db, reglas, row.concepto, row.importe_centimos) : null;
+        const pareja = abierto ? sugerirTraspaso(
+          {
+            id: row.id,
+            cuentaId: row.cuenta_id,
+            fecha: row.fecha,
+            importeCentimos: row.importe_centimos,
+            cuentaNombre: row.cuenta_nombre ?? ""
+          },
+          candidatos
+        ) : null;
+        const sugerencia = sugerida ? {
+          destino: sugerida.destino,
+          categoriaFinca: sugerida.categoriaFinca,
+          propiedadId: sugerida.propiedadId,
+          propiedadNombre: sugerida.propiedadNombre,
+          categoriaPersonal: sugerida.categoriaPersonal,
+          patron: sugerida.patron
+        } : null;
+        const traspasoSugerido = pareja ? {
+          id: pareja.id,
+          cuentaNombre: pareja.cuentaNombre,
+          fecha: pareja.fecha,
+          importeCentimos: pareja.importeCentimos
+        } : null;
+        const repartos = (porMov.get(row.id) ?? []).map((parte) => ({
+          id: parte.id,
+          propiedadId: parte.propiedad_id,
+          propiedadNombre: propiedades.get(parte.propiedad_id) ?? null,
+          categoriaFinca: parte.categoria_finca,
+          importeCentimos: parte.importe_centimos,
+          fincaError: parte.finca_error
+        }));
+        return movJson(row, { sugerencia, traspasoSugerido, repartos });
+      });
     },
     async clasificar(id, body) {
-      if (!esDestino(body.destino)) throw new HttpError(400, "Destino desconocido");
-      const mov = getMovimiento(db, id);
-      if (!mov) throw new HttpError(404, "No encuentro el movimiento");
-      const destino = body.destino;
-      const categoriaFinca = destino === "finca" ? body.categoriaFinca ?? null : null;
-      const propiedadId = destino === "finca" ? body.propiedadId ?? null : null;
-      const categoriaPersonal = destino === "personal" ? body.categoriaPersonal ?? null : null;
-      const error = errorClasificacion({
-        destino,
-        importeCentimos: mov.importe_centimos,
-        categoriaFinca,
-        propiedadId,
-        categoriaPersonal
-      });
-      if (error) throw new HttpError(400, error);
-      if (destino === "finca" && propiedadId && !getPropiedad(db, propiedadId)) {
+      const listo = prepararClasificacion(db, id, body);
+      const reglaId = body.recordar ? guardarRegla(db, listo.mov, listo, body) : null;
+      escribirClasificacion(db, listo, body, reglaId);
+      if (reglaId) aplicarReglasPendientes(db);
+      await sincronizarFinca(db, escritor);
+    },
+    async clasificarVarios(body) {
+      if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.some((id) => typeof id !== "string")) {
+        throw new HttpError(400, "Elige al menos un apunte");
+      }
+      const listos = body.ids.map((id) => prepararClasificacion(db, id, body));
+      const reglaId = body.recordar ? guardarRegla(db, listos[0].mov, listos[0], body) : null;
+      for (const listo of listos) escribirClasificacion(db, listo, body, reglaId);
+      if (reglaId) aplicarReglasPendientes(db);
+      await sincronizarFinca(db, escritor);
+    },
+    previsualizar(body) {
+      if (!esDestino(body.destino) || body.destino !== "finca" && body.destino !== "personal") {
+        throw new HttpError(400, "Esa acci\xF3n no guarda una regla");
+      }
+      const patron = normalizar(body.patron ?? "");
+      if (patron.length < 3) {
+        throw new HttpError(400, "El patr\xF3n es demasiado corto. Deja una palabra del concepto, por ejemplo endesa.");
+      }
+      const categoriaFinca = body.destino === "finca" ? body.categoriaFinca ?? null : null;
+      const propiedadId = body.destino === "finca" ? body.propiedadId ?? null : null;
+      const categoriaPersonal = body.destino === "personal" ? body.categoriaPersonal ?? null : null;
+      if (body.destino === "finca" && (!categoriaFinca || !propiedadId)) {
+        throw new HttpError(400, "Falta la propiedad o la categor\xEDa");
+      }
+      if (body.destino === "personal" && !categoriaPersonal) throw new HttpError(400, "Falta la categor\xEDa");
+      if (propiedadId && !getPropiedad(db, propiedadId)) {
         throw new HttpError(400, "No tengo esa propiedad. Tr\xE1ela de Finca o a\xF1\xE1dela a mano.");
       }
-      let reglaId = null;
-      if (body.recordar) {
-        if (destino === "pendiente") throw new HttpError(400, "Elige un destino antes de recordar el concepto");
-        const patron = normalizar(body.patron || sugerirPatron(mov.concepto));
-        if (patron.length < 3) {
-          throw new HttpError(400, "El patr\xF3n es demasiado corto. Deja una palabra del concepto, por ejemplo endesa.");
-        }
-        reglaId = upsertRegla(db, {
-          id: randomUUID(),
+      return {
+        coincidencias: coincidenciasRegla(db, {
           patron,
-          destino,
-          categoria_finca: categoriaFinca,
-          propiedad_id: propiedadId,
-          categoria_personal: categoriaPersonal,
-          creado_en: (/* @__PURE__ */ new Date()).toISOString()
+          destino: body.destino,
+          categoriaFinca,
+          propiedadId,
+          categoriaPersonal
+        })
+      };
+    },
+    async repartir(id, partes) {
+      const mov = getMovimiento(db, id);
+      if (!mov) throw new HttpError(404, "No encuentro el movimiento");
+      if (!Array.isArray(partes) || partes.length < 2) throw new HttpError(400, "Parte el apunte en dos.");
+      if (mov.importe_centimos === 0) throw new HttpError(400, "Un apunte de cero no se parte.");
+      const signo = Math.sign(mov.importe_centimos);
+      let suma = 0;
+      for (const parte of partes) {
+        if (!parte || !Number.isInteger(parte.importeCentimos) || Math.sign(parte.importeCentimos) !== signo) {
+          throw new HttpError(400, "Cada parte tiene que ir en el mismo sentido que el apunte.");
+        }
+        suma += parte.importeCentimos;
+        const error = errorClasificacion({
+          destino: "finca",
+          importeCentimos: parte.importeCentimos,
+          categoriaFinca: parte.categoriaFinca,
+          propiedadId: parte.propiedadId
         });
+        if (error) throw new HttpError(400, error);
+        if (!getPropiedad(db, parte.propiedadId)) {
+          throw new HttpError(400, "No tengo esa propiedad. Tr\xE1ela de Finca o a\xF1\xE1dela a mano.");
+        }
+      }
+      if (suma !== mov.importe_centimos) throw new HttpError(400, "Las partes tienen que sumar el importe del apunte.");
+      const vivas = repartosVigentes(db).get(id) ?? [];
+      const iguales = vivas.length === partes.length && vivas.every(
+        (parte, i) => parte.propiedad_id === partes[i]?.propiedadId && parte.categoria_finca === partes[i]?.categoriaFinca && parte.importe_centimos === partes[i]?.importeCentimos
+      );
+      if (!iguales) {
+        obsoletarRepartos(db, id);
+        for (const parte of partes) {
+          insertReparto(db, {
+            id: randomUUID2(),
+            movimientoId: id,
+            propiedadId: parte.propiedadId,
+            categoriaFinca: parte.categoriaFinca,
+            importeCentimos: parte.importeCentimos
+          });
+        }
       }
       updateClasificacion(db, {
         id,
-        destino,
-        categoriaFinca,
-        propiedadId,
-        categoriaPersonal,
-        nota: body.nota ?? mov.nota,
-        reglaId,
-        clasificadoEn: destino === "pendiente" ? null : (/* @__PURE__ */ new Date()).toISOString(),
+        destino: "finca",
+        categoriaFinca: null,
+        propiedadId: null,
+        categoriaPersonal: null,
+        nota: mov.nota,
+        reglaId: null,
+        clasificadoEn: (/* @__PURE__ */ new Date()).toISOString(),
         exportadoFincaEn: mov.exportado_finca_en
       });
-      if (reglaId) aplicarReglasPendientes(db);
       await sincronizarFinca(db, escritor);
+    },
+    copiarLibro() {
+      return copiarLibro(db);
     },
     registro(mes) {
       if (!/^\d{4}-\d{2}$/.test(mes)) throw new HttpError(400, "El mes tiene que ser AAAA-MM");
       const crudas = listMovimientosInforme(db);
-      const movs = crudas.map((m) => ({
-        fecha: m.fecha,
-        importeCentimos: m.importe_centimos,
-        destino: destinoDe(m),
-        categoriaFinca: m.categoria_finca,
-        categoriaPersonal: m.categoria_personal
-      }));
+      const porMov = repartosVigentes(db);
+      const movs = [];
+      const paraAvisos = [];
+      for (const m of crudas) {
+        const destino = destinoDe(m);
+        const trozos = destino === "finca" ? porMov.get(m.id) ?? [] : [];
+        if (trozos.length > 0) {
+          for (const parte of trozos) {
+            movs.push({
+              fecha: m.fecha,
+              importeCentimos: parte.importe_centimos,
+              destino: "finca",
+              categoriaFinca: parte.categoria_finca,
+              categoriaPersonal: null
+            });
+            paraAvisos.push({
+              fecha: m.fecha,
+              destino: "finca",
+              importeCentimos: parte.importe_centimos,
+              categoriaFinca: parte.categoria_finca,
+              propiedadId: parte.propiedad_id
+            });
+          }
+          continue;
+        }
+        movs.push({
+          fecha: m.fecha,
+          importeCentimos: m.importe_centimos,
+          destino,
+          categoriaFinca: m.categoria_finca,
+          categoriaPersonal: m.categoria_personal
+        });
+        paraAvisos.push({
+          fecha: m.fecha,
+          destino,
+          importeCentimos: m.importe_centimos,
+          categoriaFinca: m.categoria_finca,
+          propiedadId: m.propiedad_id
+        });
+      }
       const inf = informeMes(movs, mes);
       const cuentas = listCuentas(db);
       const deFym = cuentas.filter((c) => Number(c.en_fym) === 1);
@@ -3151,6 +3801,11 @@ function crearServicio(db, rutas2, opciones = {}) {
         porCategoria: inf.porCategoria.filter((l) => l.ambito === "finca"),
         pendientes: inf.pendientes,
         descuadres,
+        avisos: avisosDelMes(
+          paraAvisos,
+          mes,
+          listPropiedades(db).map((p) => ({ id: p.id, nombre: p.nombre }))
+        ),
         historial: historialSaldos(
           listArchivos(db).map((a) => ({
             cuentaId: a.cuenta_id,
@@ -3173,7 +3828,7 @@ function crearServicio(db, rutas2, opciones = {}) {
       if (body.saldoInicialFecha && !parseFecha(body.saldoInicialFecha)) {
         throw new HttpError(400, "La fecha del saldo inicial no vale");
       }
-      const id = randomUUID();
+      const id = randomUUID2();
       const ahora = (/* @__PURE__ */ new Date()).toISOString();
       insertCuenta(db, {
         id,
@@ -3224,6 +3879,16 @@ function crearServicio(db, rutas2, opciones = {}) {
       deleteCuenta(db, id);
     },
     async asignar(archivoId, cuentaId) {
+      const archivo = getArchivo(db, archivoId);
+      if (!archivo) throw new HttpError(404, "No encuentro ese extracto");
+      if (!getCuenta(db, cuentaId)) throw new HttpError(400, "No encuentro esa cuenta");
+      if (archivo.cuenta_id && archivo.cuenta_id !== cuentaId) {
+        if (escritor) await retirarArchivoDeFinca(db, escritor, archivoId);
+        moverArchivo(db, archivoId, cuentaId);
+        await sincronizarFinca(db, escritor);
+        return;
+      }
+      if (archivo.cuenta_id === cuentaId) return;
       await asignarArchivo(db, rutas2, archivoId, cuentaId);
       await sincronizarFinca(db, escritor);
     },
@@ -3236,7 +3901,7 @@ function crearServicio(db, rutas2, opciones = {}) {
       if (!nombre) throw new HttpError(400, "Falta el nombre de la propiedad");
       const ya = listPropiedades(db).find((p) => normalizar(p.nombre) === normalizar(nombre));
       if (ya) throw new HttpError(400, "Ya tengo una propiedad con ese nombre");
-      const row = { id: `local-${randomUUID()}`, nombre, origen: "manual", visto_en: (/* @__PURE__ */ new Date()).toISOString() };
+      const row = { id: `local-${randomUUID2()}`, nombre, origen: "manual", visto_en: (/* @__PURE__ */ new Date()).toISOString() };
       upsertPropiedad(db, row);
       return { id: row.id, nombre, origen: "manual" };
     },
@@ -3259,14 +3924,14 @@ function crearServicio(db, rutas2, opciones = {}) {
     },
     escribirExportacion(soloNuevos = true) {
       const payload = armarExportacion(db, soloNuevos);
-      const dir = join4(rutas2.exportDir, "finca");
+      const dir = join5(rutas2.exportDir, "finca");
       mkdirSync3(dir, { recursive: true });
       const ficheros = payload.ficheros.map((f) => {
-        const ruta = join4(dir, f.fichero);
+        const ruta = join5(dir, f.fichero);
         writeFileSync3(ruta, f.texto);
         return { ...f, ruta };
       });
-      const rutaFym = join4(rutas2.exportDir, "fym-propuesta.json");
+      const rutaFym = join5(rutas2.exportDir, "fym-propuesta.json");
       writeFileSync3(rutaFym, `${JSON.stringify(payload.fym, null, 2)}
 `);
       return { ...payload, ficheros, rutaFym };
@@ -3284,8 +3949,8 @@ function crearServicio(db, rutas2, opciones = {}) {
 var maxDuration = 60;
 var rutas = {
   root: "/tmp/extractos",
-  inbox: join5("/tmp/extractos", "inbox"),
-  exportDir: join5("/tmp/extractos", "export")
+  inbox: join6("/tmp/extractos", "inbox"),
+  exportDir: join6("/tmp/extractos", "export")
 };
 function json(res, status, body) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });

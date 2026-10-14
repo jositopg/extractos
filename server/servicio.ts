@@ -4,34 +4,45 @@ import { randomUUID } from 'node:crypto'
 import type {
   CatalogoJson,
   ClasificarBody,
+  ClasificarVariosBody,
   CuentaBody,
   CuentaJson,
   EstadoFincaJson,
   ExportacionJson,
   FicheroFincaJson,
   MovimientoJson,
+  ParteReparto,
   PropiedadJson,
   RegistroJson,
+  RepartoJson,
   ResumenJson,
+  SugerenciaJson,
+  TraspasoSugeridoJson,
+  VistaReglaJson,
 } from '../shared/api'
+import { avisosDelMes, type MovimientoAviso } from '../shared/avisos'
 import { esDestino, esTipoCuenta, type Destino } from '../shared/categorias'
 import { errorClasificacion, sugerirPatron } from '../shared/clasificar'
-import { exportarFinca, propuestaFym, type PropuestaCuenta } from '../shared/exportar'
+import { exportarFinca, propuestaFym, type MovimientoExportable, type PropuestaCuenta } from '../shared/exportar'
 import { textoEur } from '../shared/formato'
 import { cccDesdeIban, hoyLocal, normalizar, parseFecha } from '../shared/money'
 import { gastosBrutos, historialSaldos, informeMes, mediaGastoVida, saldoDeCuenta, type MovimientoInforme } from '../shared/patrimonio'
+import { sugerirTraspaso } from '../shared/traspaso'
 import { ultimoApunte } from '../shared/visto'
 import { sincronizarCatalogos } from './catalogos'
 import {
+  copiarLibro as copiaDelLibro,
   contarMovimientosCuenta,
   deleteCuenta,
   deleteRegla,
   destinoDe,
   estadoFinca,
+  getArchivo,
   getCuenta,
   getMovimiento,
   getPropiedad,
   insertCuenta,
+  insertReparto,
   hashesGuardados,
   listArchivos,
   listCuentas,
@@ -41,7 +52,9 @@ import {
   listMovimientosInforme,
   listPropiedades,
   listReglas,
+  listRepartos,
   marcarExportados,
+  obsoletarRepartos,
   recuento,
   tipoDe,
   updateClasificacion,
@@ -50,10 +63,23 @@ import {
   upsertRegla,
   type Db,
   type MovimientoRow,
+  type RepartoRow,
 } from './db'
 import { retirarArchivoDeFinca, sincronizarFinca, type EscritorFinca } from './finca'
 import { HttpError } from './http'
-import { aplicarReglasPendientes, asignarArchivo, borrarArchivo, engancharPendientes, guardarSubida, importarInbox, type Rutas } from './importar'
+import {
+  aplicarReglasPendientes,
+  asignarArchivo,
+  borrarArchivo,
+  coincidenciasRegla,
+  engancharPendientes,
+  guardarSubida,
+  importarInbox,
+  moverArchivo,
+  reglasDelLibro,
+  sugerirMovimiento,
+  type Rutas,
+} from './importar'
 
 function cuentaJson(
   db: Db,
@@ -62,6 +88,12 @@ function cuentaJson(
   const archivos = listArchivos(db)
   const movs = listMovimientosInforme(db)
   const fym = listFym(db)
+  const abiertosPorCuenta = new Map<string, number>()
+  for (const mov of movs) {
+    if (mov.destino === 'pendiente' || mov.destino === 'duda') {
+      abiertosPorCuenta.set(mov.cuenta_id, (abiertosPorCuenta.get(mov.cuenta_id) ?? 0) + 1)
+    }
+  }
   const porCuenta = new Map<string, { fecha: string; concepto: string; importeCentimos: number; orden: number }[]>()
   for (const mov of movs) {
     const lista = porCuenta.get(mov.cuenta_id) ?? []
@@ -115,11 +147,15 @@ function cuentaJson(
       fymValorCentimos: enlace?.valor_centimos ?? null,
       diferenciaCentimos: diferencia,
       ultimoApunte: ultimoApunte(porCuenta.get(c.id) ?? []),
+      pendientes: abiertosPorCuenta.get(c.id) ?? 0,
     }
   })
 }
 
-function movJson(row: MovimientoRow): MovimientoJson {
+function movJson(
+  row: MovimientoRow,
+  extra: { sugerencia: SugerenciaJson | null; traspasoSugerido: TraspasoSugeridoJson | null; repartos: RepartoJson[] },
+): MovimientoJson {
   return {
     id: row.id,
     cuentaId: row.cuenta_id,
@@ -137,7 +173,86 @@ function movJson(row: MovimientoRow): MovimientoJson {
     exportadoFincaEn: row.exportado_finca_en,
     fincaSincronizadoEn: row.finca_sincronizado_en,
     fincaError: row.finca_error,
+    sugerencia: extra.sugerencia,
+    traspasoSugerido: extra.traspasoSugerido,
+    repartos: extra.repartos,
   }
+}
+
+type ClasificacionLista = {
+  mov: MovimientoRow
+  destino: Destino
+  categoriaFinca: string | null
+  propiedadId: string | null
+  categoriaPersonal: string | null
+}
+
+function prepararClasificacion(db: Db, id: string, body: ClasificarBody): ClasificacionLista {
+  if (!esDestino(body.destino)) throw new HttpError(400, 'Destino desconocido')
+  const mov = getMovimiento(db, id)
+  if (!mov) throw new HttpError(404, 'No encuentro el movimiento')
+  const destino: Destino = body.destino
+  const categoriaFinca = destino === 'finca' ? (body.categoriaFinca ?? null) : null
+  const propiedadId = destino === 'finca' ? (body.propiedadId ?? null) : null
+  const categoriaPersonal = destino === 'personal' ? (body.categoriaPersonal ?? null) : null
+  const error = errorClasificacion({
+    destino,
+    importeCentimos: mov.importe_centimos,
+    categoriaFinca,
+    propiedadId,
+    categoriaPersonal,
+  })
+  if (error) throw new HttpError(400, error)
+  if (destino === 'finca' && propiedadId && !getPropiedad(db, propiedadId)) {
+    throw new HttpError(400, 'No tengo esa propiedad. Tráela de Finca o añádela a mano.')
+  }
+  if (body.recordar && (destino === 'pendiente' || destino === 'duda')) {
+    throw new HttpError(400, 'Elige un destino antes de recordar el concepto')
+  }
+  return { mov, destino, categoriaFinca, propiedadId, categoriaPersonal }
+}
+
+function guardarRegla(db: Db, mov: MovimientoRow, listo: ClasificacionLista, body: ClasificarBody): string {
+  const patron = normalizar(body.patron || sugerirPatron(mov.concepto))
+  if (patron.length < 3) {
+    throw new HttpError(400, 'El patrón es demasiado corto. Deja una palabra del concepto, por ejemplo endesa.')
+  }
+  return upsertRegla(db, {
+    id: randomUUID(),
+    patron,
+    destino: listo.destino,
+    categoria_finca: listo.categoriaFinca,
+    propiedad_id: listo.propiedadId,
+    categoria_personal: listo.categoriaPersonal,
+    creado_en: new Date().toISOString(),
+  })
+}
+
+function escribirClasificacion(db: Db, listo: ClasificacionLista, body: ClasificarBody, reglaId: string | null): void {
+  const abierto = listo.destino === 'pendiente' || listo.destino === 'duda'
+  obsoletarRepartos(db, listo.mov.id)
+  updateClasificacion(db, {
+    id: listo.mov.id,
+    destino: listo.destino,
+    categoriaFinca: listo.categoriaFinca,
+    propiedadId: listo.propiedadId,
+    categoriaPersonal: listo.categoriaPersonal,
+    nota: body.nota ?? listo.mov.nota,
+    reglaId,
+    clasificadoEn: abierto ? null : new Date().toISOString(),
+    exportadoFincaEn: listo.mov.exportado_finca_en,
+  })
+}
+
+function repartosVigentes(db: Db): Map<string, RepartoRow[]> {
+  const mapa = new Map<string, RepartoRow[]>()
+  for (const parte of listRepartos(db)) {
+    if (Number(parte.vigente) !== 1) continue
+    const lista = mapa.get(parte.movimiento_id) ?? []
+    lista.push(parte)
+    mapa.set(parte.movimiento_id, lista)
+  }
+  return mapa
 }
 
 function informes(db: Db): MovimientoInforme[] {
@@ -151,8 +266,28 @@ function informes(db: Db): MovimientoInforme[] {
 }
 
 function armarExportacion(db: Db, soloNuevos: boolean): ExportacionJson {
-  const ficheros = exportarFinca(
-    listMovimientosFinca(db).map((m) => ({
+  const nombres = new Map(listPropiedades(db).map((p) => [p.id, p.nombre]))
+  const porMov = repartosVigentes(db)
+  const lineas: MovimientoExportable[] = []
+  for (const m of listMovimientosFinca(db)) {
+    const trozos = porMov.get(m.id) ?? []
+    if (trozos.length > 0) {
+      for (const parte of trozos) {
+        lineas.push({
+          id: m.id,
+          fecha: m.fecha,
+          importeCentimos: parte.importe_centimos,
+          concepto: m.concepto,
+          destino: 'finca',
+          categoriaFinca: parte.categoria_finca,
+          propiedadId: parte.propiedad_id,
+          propiedadNombre: nombres.get(parte.propiedad_id) ?? null,
+          exportadoFincaEn: m.exportado_finca_en,
+        })
+      }
+      continue
+    }
+    lineas.push({
       id: m.id,
       fecha: m.fecha,
       importeCentimos: m.importe_centimos,
@@ -162,9 +297,9 @@ function armarExportacion(db: Db, soloNuevos: boolean): ExportacionJson {
       propiedadId: m.propiedad_id,
       propiedadNombre: m.propiedad_nombre,
       exportadoFincaEn: m.exportado_finca_en,
-    })),
-    soloNuevos,
-  )
+    })
+  }
+  const ficheros = exportarFinca(lineas, soloNuevos)
   const media = mediaGastoVida(informes(db), hoyLocal())
   const cuentas: PropuestaCuenta[] = cuentaJson(db).map((c) => ({
     nombre: c.nombre,
@@ -260,75 +395,227 @@ export function crearServicio(db: Db, rutas: Rutas, opciones: OpcionesServicio =
     },
 
     movimientos(filtro: { destino?: string; cuentaId?: string; q?: string }): MovimientoJson[] {
-      const destino = filtro.destino && esDestino(filtro.destino) ? filtro.destino : null
+      const abiertos = filtro.destino === 'abiertos'
+      const destino = !abiertos && filtro.destino && esDestino(filtro.destino) ? filtro.destino : null
       const q = normalizar(filtro.q ?? '')
-      const rows = listMovimientos(db, { destino, cuentaId: filtro.cuentaId || null, limit: q ? 2000 : 500 })
-      return rows.filter((r) => !q || normalizar(`${r.concepto} ${r.nota}`).includes(q)).slice(0, 500).map(movJson)
+      const rows = listMovimientos(db, {
+        destino: abiertos ? null : destino,
+        destinos: abiertos ? ['pendiente', 'duda'] : null,
+        cuentaId: filtro.cuentaId || null,
+        limit: q ? 2000 : 500,
+      })
+        .filter((r) => !q || normalizar(`${r.concepto} ${r.nota}`).includes(q))
+        .slice(0, 500)
+      const reglas = reglasDelLibro(db)
+      const nombres = new Map(listCuentas(db).map((c) => [c.id, c.nombre]))
+      const propiedades = new Map(listPropiedades(db).map((p) => [p.id, p.nombre]))
+      const candidatos = listMovimientosInforme(db).map((m) => ({
+        id: m.id,
+        cuentaId: m.cuenta_id,
+        fecha: m.fecha,
+        importeCentimos: m.importe_centimos,
+        cuentaNombre: nombres.get(m.cuenta_id) ?? '',
+      }))
+      const porMov = repartosVigentes(db)
+      return rows.map((row) => {
+        const abierto = row.destino === 'pendiente' || row.destino === 'duda'
+        const sugerida = abierto ? sugerirMovimiento(db, reglas, row.concepto, row.importe_centimos) : null
+        const pareja = abierto
+          ? sugerirTraspaso(
+              {
+                id: row.id,
+                cuentaId: row.cuenta_id,
+                fecha: row.fecha,
+                importeCentimos: row.importe_centimos,
+                cuentaNombre: row.cuenta_nombre ?? '',
+              },
+              candidatos,
+            )
+          : null
+        const sugerencia: SugerenciaJson | null = sugerida
+          ? {
+              destino: sugerida.destino,
+              categoriaFinca: sugerida.categoriaFinca,
+              propiedadId: sugerida.propiedadId,
+              propiedadNombre: sugerida.propiedadNombre,
+              categoriaPersonal: sugerida.categoriaPersonal,
+              patron: sugerida.patron,
+            }
+          : null
+        const traspasoSugerido: TraspasoSugeridoJson | null = pareja
+          ? {
+              id: pareja.id,
+              cuentaNombre: pareja.cuentaNombre,
+              fecha: pareja.fecha,
+              importeCentimos: pareja.importeCentimos,
+            }
+          : null
+        const repartos: RepartoJson[] = (porMov.get(row.id) ?? []).map((parte) => ({
+          id: parte.id,
+          propiedadId: parte.propiedad_id,
+          propiedadNombre: propiedades.get(parte.propiedad_id) ?? null,
+          categoriaFinca: parte.categoria_finca,
+          importeCentimos: parte.importe_centimos,
+          fincaError: parte.finca_error,
+        }))
+        return movJson(row, { sugerencia, traspasoSugerido, repartos })
+      })
     },
 
     async clasificar(id: string, body: ClasificarBody): Promise<void> {
-      if (!esDestino(body.destino)) throw new HttpError(400, 'Destino desconocido')
-      const mov = getMovimiento(db, id)
-      if (!mov) throw new HttpError(404, 'No encuentro el movimiento')
-      const destino: Destino = body.destino
-      const categoriaFinca = destino === 'finca' ? (body.categoriaFinca ?? null) : null
-      const propiedadId = destino === 'finca' ? (body.propiedadId ?? null) : null
-      const categoriaPersonal = destino === 'personal' ? (body.categoriaPersonal ?? null) : null
-      const error = errorClasificacion({
-        destino,
-        importeCentimos: mov.importe_centimos,
-        categoriaFinca,
-        propiedadId,
-        categoriaPersonal,
-      })
-      if (error) throw new HttpError(400, error)
-      if (destino === 'finca' && propiedadId && !getPropiedad(db, propiedadId)) {
-        throw new HttpError(400, 'No tengo esa propiedad. Tráela de Finca o añádela a mano.')
-      }
-
-      let reglaId: string | null = null
-      if (body.recordar) {
-        if (destino === 'pendiente') throw new HttpError(400, 'Elige un destino antes de recordar el concepto')
-        const patron = normalizar(body.patron || sugerirPatron(mov.concepto))
-        if (patron.length < 3) {
-          throw new HttpError(400, 'El patrón es demasiado corto. Deja una palabra del concepto, por ejemplo endesa.')
-        }
-        reglaId = upsertRegla(db, {
-          id: randomUUID(),
-          patron,
-          destino,
-          categoria_finca: categoriaFinca,
-          propiedad_id: propiedadId,
-          categoria_personal: categoriaPersonal,
-          creado_en: new Date().toISOString(),
-        })
-      }
-
-      updateClasificacion(db, {
-        id,
-        destino,
-        categoriaFinca,
-        propiedadId,
-        categoriaPersonal,
-        nota: body.nota ?? mov.nota,
-        reglaId,
-        clasificadoEn: destino === 'pendiente' ? null : new Date().toISOString(),
-        exportadoFincaEn: mov.exportado_finca_en,
-      })
+      const listo = prepararClasificacion(db, id, body)
+      const reglaId = body.recordar ? guardarRegla(db, listo.mov, listo, body) : null
+      escribirClasificacion(db, listo, body, reglaId)
       if (reglaId) aplicarReglasPendientes(db)
       await sincronizarFinca(db, escritor)
+    },
+
+    async clasificarVarios(body: ClasificarVariosBody): Promise<void> {
+      if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.some((id) => typeof id !== 'string')) {
+        throw new HttpError(400, 'Elige al menos un apunte')
+      }
+      const listos = body.ids.map((id) => prepararClasificacion(db, id, body))
+      const reglaId = body.recordar ? guardarRegla(db, listos[0].mov, listos[0], body) : null
+      for (const listo of listos) escribirClasificacion(db, listo, body, reglaId)
+      if (reglaId) aplicarReglasPendientes(db)
+      await sincronizarFinca(db, escritor)
+    },
+
+    previsualizar(body: ClasificarBody): VistaReglaJson {
+      if (!esDestino(body.destino) || (body.destino !== 'finca' && body.destino !== 'personal')) {
+        throw new HttpError(400, 'Esa acción no guarda una regla')
+      }
+      const patron = normalizar(body.patron ?? '')
+      if (patron.length < 3) {
+        throw new HttpError(400, 'El patrón es demasiado corto. Deja una palabra del concepto, por ejemplo endesa.')
+      }
+      const categoriaFinca = body.destino === 'finca' ? (body.categoriaFinca ?? null) : null
+      const propiedadId = body.destino === 'finca' ? (body.propiedadId ?? null) : null
+      const categoriaPersonal = body.destino === 'personal' ? (body.categoriaPersonal ?? null) : null
+      if (body.destino === 'finca' && (!categoriaFinca || !propiedadId)) {
+        throw new HttpError(400, 'Falta la propiedad o la categoría')
+      }
+      if (body.destino === 'personal' && !categoriaPersonal) throw new HttpError(400, 'Falta la categoría')
+      if (propiedadId && !getPropiedad(db, propiedadId)) {
+        throw new HttpError(400, 'No tengo esa propiedad. Tráela de Finca o añádela a mano.')
+      }
+      return {
+        coincidencias: coincidenciasRegla(db, {
+          patron,
+          destino: body.destino,
+          categoriaFinca,
+          propiedadId,
+          categoriaPersonal,
+        }),
+      }
+    },
+
+    async repartir(id: string, partes: ParteReparto[]): Promise<void> {
+      const mov = getMovimiento(db, id)
+      if (!mov) throw new HttpError(404, 'No encuentro el movimiento')
+      if (!Array.isArray(partes) || partes.length < 2) throw new HttpError(400, 'Parte el apunte en dos.')
+      if (mov.importe_centimos === 0) throw new HttpError(400, 'Un apunte de cero no se parte.')
+      const signo = Math.sign(mov.importe_centimos)
+      let suma = 0
+      for (const parte of partes) {
+        if (!parte || !Number.isInteger(parte.importeCentimos) || Math.sign(parte.importeCentimos) !== signo) {
+          throw new HttpError(400, 'Cada parte tiene que ir en el mismo sentido que el apunte.')
+        }
+        suma += parte.importeCentimos
+        const error = errorClasificacion({
+          destino: 'finca',
+          importeCentimos: parte.importeCentimos,
+          categoriaFinca: parte.categoriaFinca,
+          propiedadId: parte.propiedadId,
+        })
+        if (error) throw new HttpError(400, error)
+        if (!getPropiedad(db, parte.propiedadId)) {
+          throw new HttpError(400, 'No tengo esa propiedad. Tráela de Finca o añádela a mano.')
+        }
+      }
+      if (suma !== mov.importe_centimos) throw new HttpError(400, 'Las partes tienen que sumar el importe del apunte.')
+      const vivas = (repartosVigentes(db).get(id) ?? [])
+      const iguales =
+        vivas.length === partes.length &&
+        vivas.every(
+          (parte, i) =>
+            parte.propiedad_id === partes[i]?.propiedadId &&
+            parte.categoria_finca === partes[i]?.categoriaFinca &&
+            parte.importe_centimos === partes[i]?.importeCentimos,
+        )
+      if (!iguales) {
+        obsoletarRepartos(db, id)
+        for (const parte of partes) {
+          insertReparto(db, {
+            id: randomUUID(),
+            movimientoId: id,
+            propiedadId: parte.propiedadId,
+            categoriaFinca: parte.categoriaFinca,
+            importeCentimos: parte.importeCentimos,
+          })
+        }
+      }
+      updateClasificacion(db, {
+        id,
+        destino: 'finca',
+        categoriaFinca: null,
+        propiedadId: null,
+        categoriaPersonal: null,
+        nota: mov.nota,
+        reglaId: null,
+        clasificadoEn: new Date().toISOString(),
+        exportadoFincaEn: mov.exportado_finca_en,
+      })
+      await sincronizarFinca(db, escritor)
+    },
+
+    copiarLibro(): Buffer {
+      return copiaDelLibro(db)
     },
 
     registro(mes: string): RegistroJson {
       if (!/^\d{4}-\d{2}$/.test(mes)) throw new HttpError(400, 'El mes tiene que ser AAAA-MM')
       const crudas = listMovimientosInforme(db)
-      const movs = crudas.map((m) => ({
-        fecha: m.fecha,
-        importeCentimos: m.importe_centimos,
-        destino: destinoDe(m),
-        categoriaFinca: m.categoria_finca,
-        categoriaPersonal: m.categoria_personal,
-      }))
+      const porMov = repartosVigentes(db)
+      const movs: MovimientoInforme[] = []
+      const paraAvisos: MovimientoAviso[] = []
+      for (const m of crudas) {
+        const destino = destinoDe(m)
+        const trozos = destino === 'finca' ? (porMov.get(m.id) ?? []) : []
+        if (trozos.length > 0) {
+          for (const parte of trozos) {
+            movs.push({
+              fecha: m.fecha,
+              importeCentimos: parte.importe_centimos,
+              destino: 'finca',
+              categoriaFinca: parte.categoria_finca,
+              categoriaPersonal: null,
+            })
+            paraAvisos.push({
+              fecha: m.fecha,
+              destino: 'finca',
+              importeCentimos: parte.importe_centimos,
+              categoriaFinca: parte.categoria_finca,
+              propiedadId: parte.propiedad_id,
+            })
+          }
+          continue
+        }
+        movs.push({
+          fecha: m.fecha,
+          importeCentimos: m.importe_centimos,
+          destino,
+          categoriaFinca: m.categoria_finca,
+          categoriaPersonal: m.categoria_personal,
+        })
+        paraAvisos.push({
+          fecha: m.fecha,
+          destino,
+          importeCentimos: m.importe_centimos,
+          categoriaFinca: m.categoria_finca,
+          propiedadId: m.propiedad_id,
+        })
+      }
       const inf = informeMes(movs, mes)
       const cuentas = listCuentas(db)
       const deFym = cuentas.filter((c) => Number(c.en_fym) === 1)
@@ -364,6 +651,11 @@ export function crearServicio(db: Db, rutas: Rutas, opciones: OpcionesServicio =
         porCategoria: inf.porCategoria.filter((l) => l.ambito === 'finca'),
         pendientes: inf.pendientes,
         descuadres,
+        avisos: avisosDelMes(
+          paraAvisos,
+          mes,
+          listPropiedades(db).map((p) => ({ id: p.id, nombre: p.nombre })),
+        ),
         historial: historialSaldos(
           listArchivos(db).map((a) => ({
             cuentaId: a.cuenta_id,
@@ -443,6 +735,16 @@ export function crearServicio(db: Db, rutas: Rutas, opciones: OpcionesServicio =
     },
 
     async asignar(archivoId: string, cuentaId: string) {
+      const archivo = getArchivo(db, archivoId)
+      if (!archivo) throw new HttpError(404, 'No encuentro ese extracto')
+      if (!getCuenta(db, cuentaId)) throw new HttpError(400, 'No encuentro esa cuenta')
+      if (archivo.cuenta_id && archivo.cuenta_id !== cuentaId) {
+        if (escritor) await retirarArchivoDeFinca(db, escritor, archivoId)
+        moverArchivo(db, archivoId, cuentaId)
+        await sincronizarFinca(db, escritor)
+        return
+      }
+      if (archivo.cuenta_id === cuentaId) return
       await asignarArchivo(db, rutas, archivoId, cuentaId)
       await sincronizarFinca(db, escritor)
     },

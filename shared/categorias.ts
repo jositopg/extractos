@@ -58,11 +58,12 @@ export const CATEGORIAS_INGRESO_PERSONAL = [
 /** No entran en el gasto de vida que se propone a Fuck You Money. */
 export const CATEGORIAS_PERSONAL_FUERA_DE_VIDA = ['Ahorro e inversión', 'Devolución de deuda'] as const
 
-export const DESTINOS = ['pendiente', 'finca', 'personal', 'traspaso', 'ignorar'] as const
+export const DESTINOS = ['pendiente', 'duda', 'finca', 'personal', 'traspaso', 'ignorar'] as const
 export type Destino = (typeof DESTINOS)[number]
 
 export const DESTINO_LABEL: Record<Destino, string> = {
   pendiente: 'Pendiente',
+  duda: 'No lo sé',
   finca: 'Finca',
   personal: 'Personal',
   traspaso: 'Traspaso',

@@ -36,6 +36,14 @@ export function Registro({ cuentas }: { cuentas: CuentaJson[] }) {
             <div><strong>{datos.pendientes}</strong><span>Sin conciliar</span></div>
           </div>
           <p className="meta">{datos.brutoAviso}</p>
+          {datos.avisos.length > 0 && (
+            <>
+              <h2>Avisos del mes</h2>
+              {datos.avisos.map((aviso) => (
+                <p key={aviso} className="aviso">{aviso}</p>
+              ))}
+            </>
+          )}
           {datos.porCategoria.length > 0 && (
             <>
               <h2>En las propiedades</h2>

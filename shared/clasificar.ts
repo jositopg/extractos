@@ -22,7 +22,7 @@ export function categoriasPara(destino: Destino, importeCentimos: number): reado
 
 export function errorClasificacion(input: Clasificacion & { importeCentimos: number }): string | null {
   const { destino, importeCentimos } = input
-  if (destino === 'pendiente' || destino === 'traspaso' || destino === 'ignorar') return null
+  if (destino === 'pendiente' || destino === 'duda' || destino === 'traspaso' || destino === 'ignorar') return null
   const categoria = destino === 'finca' ? input.categoriaFinca : input.categoriaPersonal
   if (!categoria) return 'Falta la categoría'
   const validas = categoriasPara(destino, importeCentimos)

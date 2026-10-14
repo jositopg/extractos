@@ -100,7 +100,7 @@ export function informeMes(movs: MovimientoInforme[], mes: string): InformeMes {
   const grupos = new Map<string, LineaCategoria>()
 
   for (const m of delMes) {
-    if (m.destino === 'pendiente') {
+    if (m.destino === 'pendiente' || m.destino === 'duda') {
       pendientes += 1
       continue
     }

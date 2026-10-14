@@ -1,5 +1,7 @@
-import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { Destino, TipoCuenta } from '../shared/categorias'
 import { esCuentaBancaria, esDestino, esTipoCuenta } from '../shared/categorias'
@@ -81,7 +83,21 @@ CREATE TABLE IF NOT EXISTS movimientos (
   finca_tx_id TEXT,
   finca_sincronizado_en TEXT,
   finca_error TEXT,
-  finca_firma TEXT
+  finca_firma TEXT,
+  ordinal_clave INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS repartos (
+  id TEXT PRIMARY KEY,
+  movimiento_id TEXT NOT NULL,
+  propiedad_id TEXT NOT NULL,
+  categoria_finca TEXT NOT NULL,
+  importe_centimos INTEGER NOT NULL,
+  finca_tx_id TEXT,
+  finca_firma TEXT,
+  finca_error TEXT,
+  finca_sincronizado_en TEXT,
+  vigente INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS reglas (
@@ -104,6 +120,7 @@ CREATE TABLE IF NOT EXISTS ficheros (
 CREATE INDEX IF NOT EXISTS idx_arch_hash ON archivos(contenido_hash);
 CREATE INDEX IF NOT EXISTS idx_mov_cuenta ON movimientos(cuenta_id, fecha);
 CREATE INDEX IF NOT EXISTS idx_mov_destino ON movimientos(destino);
+CREATE INDEX IF NOT EXISTS idx_reparto_mov ON repartos(movimiento_id);
 `
 
 export function openDb(path: string, opciones?: { wal?: boolean }): Db {
@@ -118,6 +135,7 @@ export function openDb(path: string, opciones?: { wal?: boolean }): Db {
   asegurarColumna(db, 'movimientos', 'finca_sincronizado_en', 'finca_sincronizado_en TEXT')
   asegurarColumna(db, 'movimientos', 'finca_error', 'finca_error TEXT')
   asegurarColumna(db, 'movimientos', 'finca_firma', 'finca_firma TEXT')
+  asegurarColumna(db, 'movimientos', 'ordinal_clave', 'ordinal_clave INTEGER')
   return db
 }
 
@@ -186,8 +204,22 @@ export type MovimientoRow = {
   finca_sincronizado_en: string | null
   finca_error: string | null
   finca_firma: string | null
+  ordinal_clave: number | null
   cuenta_nombre?: string
   propiedad_nombre?: string
+}
+
+export type RepartoRow = {
+  id: string
+  movimiento_id: string
+  propiedad_id: string
+  categoria_finca: string
+  importe_centimos: number
+  finca_tx_id: string | null
+  finca_firma: string | null
+  finca_error: string | null
+  finca_sincronizado_en: string | null
+  vigente: number
 }
 
 export type ReglaRow = {
@@ -528,7 +560,18 @@ export function hayMovimientoPorSaldo(
 }
 
 export function deleteMovimientosArchivo(db: Db, archivoId: string): void {
+  db.prepare(
+    'DELETE FROM repartos WHERE movimiento_id IN (SELECT id FROM movimientos WHERE archivo_id = ?)',
+  ).run(archivoId)
   db.prepare('DELETE FROM movimientos WHERE archivo_id = ?').run(archivoId)
+}
+
+export function listMovimientosArchivo(db: Db, archivoId: string): MovimientoRow[] {
+  return all<MovimientoRow>(
+    db,
+    'SELECT * FROM movimientos WHERE archivo_id = ? ORDER BY orden ASC, id ASC',
+    archivoId,
+  )
 }
 
 export function deleteArchivo(db: Db, id: string): void {
@@ -559,13 +602,14 @@ export function insertMovimiento(
     nota: string
     reglaId: string | null
     clasificadoEn: string | null
+    ordinalClave: number
   },
 ): void {
   db.prepare(
     `INSERT INTO movimientos (
       id, cuenta_id, archivo_id, orden, fecha, fecha_valor, importe_centimos, saldo_centimos, concepto, documento,
-      destino, categoria_finca, propiedad_id, categoria_personal, nota, regla_id, clasificado_en
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      destino, categoria_finca, propiedad_id, categoria_personal, nota, regla_id, clasificado_en, ordinal_clave
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.cuentaId,
@@ -584,6 +628,7 @@ export function insertMovimiento(
     row.nota,
     row.reglaId,
     row.clasificadoEn,
+    row.ordinalClave,
   )
 }
 
@@ -597,8 +642,24 @@ export function getMovimiento(db: Db, id: string): MovimientoRow | undefined {
 
 export function listMovimientos(
   db: Db,
-  filtro: { destino?: string | null; cuentaId?: string | null; limit: number },
+  filtro: { destino?: string | null; destinos?: string[] | null; cuentaId?: string | null; limit: number },
 ): MovimientoRow[] {
+  const cuenta = filtro.cuentaId ?? null
+  if (filtro.destinos && filtro.destinos.length > 0) {
+    const marks = filtro.destinos.map(() => '?').join(', ')
+    return all<MovimientoRow>(
+      db,
+      `SELECT m.*, c.nombre AS cuenta_nombre
+       FROM movimientos m JOIN cuentas c ON c.id = m.cuenta_id
+       WHERE m.destino IN (${marks}) AND (? IS NULL OR m.cuenta_id = ?)
+       ORDER BY m.fecha DESC, m.orden DESC
+       LIMIT ?`,
+      ...filtro.destinos,
+      cuenta,
+      cuenta,
+      filtro.limit,
+    )
+  }
   return all<MovimientoRow>(
     db,
     `SELECT m.*, c.nombre AS cuenta_nombre
@@ -608,8 +669,8 @@ export function listMovimientos(
      LIMIT ?`,
     filtro.destino ?? null,
     filtro.destino ?? null,
-    filtro.cuentaId ?? null,
-    filtro.cuentaId ?? null,
+    cuenta,
+    cuenta,
     filtro.limit,
   )
 }
@@ -660,16 +721,43 @@ export function updateClasificacion(
 export function listCandidatosFinca(db: Db): MovimientoRow[] {
   return all<MovimientoRow>(
     db,
-    `SELECT * FROM movimientos WHERE destino = 'finca' OR finca_tx_id IS NOT NULL`,
+    `SELECT * FROM movimientos
+     WHERE destino = 'finca'
+        OR finca_tx_id IS NOT NULL
+        OR id IN (SELECT movimiento_id FROM repartos WHERE finca_tx_id IS NOT NULL OR vigente = 0)`,
   )
 }
 
-export function listFincaDeArchivo(db: Db, archivoId: string): Array<{ id: string; finca_tx_id: string }> {
-  return all<{ id: string; finca_tx_id: string }>(
+export function listFincaDeArchivo(
+  db: Db,
+  archivoId: string,
+): Array<{ movimientoId: string; repartoId: string | null; finca_tx_id: string; referencia: string }> {
+  const movs = all<{ id: string; finca_tx_id: string }>(
     db,
     `SELECT id, finca_tx_id FROM movimientos WHERE archivo_id = ? AND finca_tx_id IS NOT NULL`,
     archivoId,
   )
+  const partes = all<{ id: string; movimiento_id: string; finca_tx_id: string }>(
+    db,
+    `SELECT r.id, r.movimiento_id, r.finca_tx_id
+     FROM repartos r JOIN movimientos m ON m.id = r.movimiento_id
+     WHERE m.archivo_id = ? AND r.finca_tx_id IS NOT NULL`,
+    archivoId,
+  )
+  return [
+    ...movs.map((m) => ({
+      movimientoId: m.id,
+      repartoId: null,
+      finca_tx_id: m.finca_tx_id,
+      referencia: `extractos:${m.id}`,
+    })),
+    ...partes.map((p) => ({
+      movimientoId: p.movimiento_id,
+      repartoId: p.id,
+      finca_tx_id: p.finca_tx_id,
+      referencia: `extractos:${p.movimiento_id}:${p.id}`,
+    })),
+  ]
 }
 
 export function marcarFincaOk(db: Db, id: string, txId: string, firma: string, cuando: string): void {
@@ -685,6 +773,59 @@ export function marcarFincaError(db: Db, id: string, error: string): void {
 export function limpiarFinca(db: Db, id: string): void {
   db.prepare(
     `UPDATE movimientos SET finca_tx_id = NULL, finca_sincronizado_en = NULL, finca_error = NULL, finca_firma = NULL WHERE id = ?`,
+  ).run(id)
+}
+
+export function marcarContenedorOk(db: Db, id: string, cuando: string): void {
+  db.prepare(
+    `UPDATE movimientos SET finca_sincronizado_en = ?, finca_error = NULL, finca_firma = NULL WHERE id = ? AND finca_tx_id IS NULL`,
+  ).run(cuando, id)
+}
+
+export function listRepartos(db: Db, movimientoId?: string | null): RepartoRow[] {
+  if (movimientoId) return all<RepartoRow>(db, 'SELECT * FROM repartos WHERE movimiento_id = ? ORDER BY id', movimientoId)
+  return all<RepartoRow>(db, 'SELECT * FROM repartos ORDER BY movimiento_id, id')
+}
+
+export function insertReparto(
+  db: Db,
+  row: { id: string; movimientoId: string; propiedadId: string; categoriaFinca: string; importeCentimos: number },
+): void {
+  db.prepare(
+    `INSERT INTO repartos (id, movimiento_id, propiedad_id, categoria_finca, importe_centimos, vigente)
+     VALUES (?, ?, ?, ?, ?, 1)`,
+  ).run(row.id, row.movimientoId, row.propiedadId, row.categoriaFinca, row.importeCentimos)
+}
+
+export function obsoletarRepartos(db: Db, movimientoId: string): void {
+  db.prepare('UPDATE repartos SET vigente = 0 WHERE movimiento_id = ? AND vigente = 1').run(movimientoId)
+}
+
+export function deleteReparto(db: Db, id: string): void {
+  db.prepare('DELETE FROM repartos WHERE id = ?').run(id)
+}
+
+export function deleteRepartosMovimiento(db: Db, movimientoId: string): void {
+  db.prepare('DELETE FROM repartos WHERE movimiento_id = ?').run(movimientoId)
+}
+
+export function moverRepartos(db: Db, desdeId: string, haciaId: string): void {
+  db.prepare('UPDATE repartos SET movimiento_id = ? WHERE movimiento_id = ?').run(haciaId, desdeId)
+}
+
+export function marcarRepartoOk(db: Db, id: string, txId: string, firma: string, cuando: string): void {
+  db.prepare(
+    `UPDATE repartos SET finca_tx_id = ?, finca_sincronizado_en = ?, finca_error = NULL, finca_firma = ? WHERE id = ?`,
+  ).run(txId, cuando, firma, id)
+}
+
+export function marcarRepartoError(db: Db, id: string, error: string): void {
+  db.prepare('UPDATE repartos SET finca_error = ? WHERE id = ?').run(error, id)
+}
+
+export function limpiarReparto(db: Db, id: string): void {
+  db.prepare(
+    `UPDATE repartos SET finca_tx_id = NULL, finca_sincronizado_en = NULL, finca_error = NULL, finca_firma = NULL WHERE id = ?`,
   ).run(id)
 }
 
@@ -759,7 +900,7 @@ export function recuento(db: Db): { pendiente: number; clasificado: number } {
   let pendiente = 0
   let clasificado = 0
   for (const row of rows) {
-    if (row.destino === 'pendiente') pendiente += row.c
+    if (row.destino === 'pendiente' || row.destino === 'duda') pendiente += row.c
     else clasificado += row.c
   }
   return { pendiente, clasificado }
@@ -771,4 +912,20 @@ export function destinoDe(row: { destino: string }): Destino {
 
 export function tipoDe(row: { tipo: string }): TipoCuenta {
   return esTipoCuenta(row.tipo) ? row.tipo : 'otro'
+}
+
+/** Copia consistente del libro abierto, también si vive en memoria. */
+export function copiarLibro(db: Db): Buffer {
+  const path = join(tmpdir(), `extractos-copia-${randomUUID()}.sqlite`)
+  const sqlPath = path.replaceAll("'", "''")
+  try {
+    db.exec(`VACUUM INTO '${sqlPath}'`)
+    return readFileSync(path)
+  } finally {
+    try {
+      unlinkSync(path)
+    } catch {
+      // La copia ya se leyó, o no llegó a crearse.
+    }
+  }
 }

@@ -15,6 +15,7 @@ export function Cuentas({ resumen, onChange }: { resumen: ResumenJson; onChange:
   const [propiedad, setPropiedad] = useState('')
   const [mensaje, setMensaje] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [mover, setMover] = useState<{ archivoId: string; cuentaId: string } | null>(null)
 
   async function crear(e: FormEvent) {
     e.preventDefault()
@@ -85,6 +86,53 @@ export function Cuentas({ resumen, onChange }: { resumen: ResumenJson; onChange:
                 {c.diferenciaCentimos != null ? ` · el extracto difiere ${textoEur(c.diferenciaCentimos)}` : ''}
               </div>
             )}
+            {resumen.archivos.filter((a) => a.cuentaId === c.id && !a.error).map((a) => (
+              <div key={a.id} className="meta">
+                {a.nombre}
+                {a.hasta ? ` · hasta ${textoFecha(a.hasta)}` : ''}
+                {a.saldoFinalCentimos != null ? ` · cierre ${textoEur(a.saldoFinalCentimos)}` : ''}
+                <div className="controles">
+                  <select
+                    value={mover?.archivoId === a.id ? mover.cuentaId : ''}
+                    aria-label={`Mover ${a.nombre}`}
+                    onChange={(e) => {
+                      const cuentaId = e.target.value
+                      setMover(cuentaId ? { archivoId: a.id, cuentaId } : null)
+                    }}
+                  >
+                    <option value="">Mover a otra cuenta</option>
+                    {resumen.cuentas.filter((otra) => otra.id !== c.id).map((otra) => (
+                      <option key={otra.id} value={otra.id}>{otra.nombre}</option>
+                    ))}
+                  </select>
+                  {mover?.archivoId === a.id && (
+                    <>
+                      <span>
+                        El extracto pasa a esa cuenta. Si el IBAN estaba solo en esta, se quita de aquí. Si la nueva no tiene IBAN, se queda en ella.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const elegido = mover
+                          void api(`/api/archivos/${elegido.archivoId}/cuenta`, {
+                            method: 'POST',
+                            body: JSON.stringify({ cuentaId: elegido.cuentaId }),
+                          })
+                            .then(async () => {
+                              setMover(null)
+                              await onChange()
+                            })
+                            .catch((err) => setError(err instanceof Error ? err.message : 'No he podido mover el extracto'))
+                        }}
+                      >
+                        Confirmar cambio
+                      </button>
+                      <button type="button" className="sec" onClick={() => setMover(null)}>Cancelar</button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))}
             <label className="check">
               <input
                 type="checkbox"

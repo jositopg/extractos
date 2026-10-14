@@ -3,6 +3,7 @@ import type { CatalogoJson, ImportacionJson, ResumenJson } from '../shared/api'
 import { ACCEPT_FICHEROS } from '../shared/formatos'
 import { api, esSesion } from './api'
 import { Bandeja } from './Bandeja'
+import { Cierre } from './Cierre'
 import { Cuentas } from './Cuentas'
 import { Finca } from './Exportar'
 import { Registro } from './Registro'
@@ -17,6 +18,8 @@ export function App() {
   const [pedirClave, setPedirClave] = useState(false)
   const [clave, setClave] = useState('')
   const [notas, setNotas] = useState<string[]>([])
+  const [asignar, setAsignar] = useState<{ archivoId: string; cuentaId: string } | null>(null)
+  const [cierreId, setCierreId] = useState<{ archivoId: string; cuentaId: string } | null>(null)
   const catalogoPedido = useRef(false)
 
   const fallar = useCallback((err: unknown, reserva: string) => {
@@ -163,7 +166,8 @@ export function App() {
             }}
           />
         </label>
-        <span className="meta">CSV, Excel, PDF o Norma 43. Si el extracto pisa días ya vistos, esos apuntes no se repiten.</span>
+        <span className="meta">CSV, Excel, PDF o Norma 43. De momento solo está comprobado el Excel de ING. Si el extracto pisa días ya vistos, esos apuntes no se repiten.</span>
+        <a className="sec" href="/api/libro">Descargar copia del libro</a>
         {resumen && !enLaWeb && <span className="meta"><code>{resumen.rutas.inbox}</code></span>}
       </div>
 
@@ -186,20 +190,10 @@ export function App() {
               <div className="acciones">
                 {!a.error && (
                   <select
-                    defaultValue=""
+                    value={asignar?.archivoId === a.id ? asignar.cuentaId : ''}
                     onChange={(e) => {
                       const cuentaId = e.target.value
-                      if (!cuentaId) return
-                      void api(`/api/archivos/${a.id}/cuenta`, {
-                        method: 'POST',
-                        body: JSON.stringify({ cuentaId }),
-                      })
-                        .then(async () => {
-                          setTab('apuntes')
-                          setNotas((prev) => ['Extracto asignado. Los apuntes están en Apuntes para puntearlos.', ...prev])
-                          await cargar()
-                        })
-                        .catch((err) => fallar(err, 'No he podido asignar la cuenta'))
+                      setAsignar(cuentaId ? { archivoId: a.id, cuentaId } : null)
                     }}
                   >
                     <option value="">Asignar a una cuenta</option>
@@ -207,6 +201,34 @@ export function App() {
                       <option key={c.id} value={c.id}>{c.nombre}</option>
                     ))}
                   </select>
+                )}
+                {asignar?.archivoId === a.id && (
+                  <>
+                    <span className="meta">
+                      El IBAN de este extracto se queda en esa cuenta si todavía no tiene. Los siguientes ficheros con el mismo IBAN se enganchan solos.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const elegido = asignar
+                        void api(`/api/archivos/${elegido.archivoId}/cuenta`, {
+                          method: 'POST',
+                          body: JSON.stringify({ cuentaId: elegido.cuentaId }),
+                        })
+                          .then(async () => {
+                            setAsignar(null)
+                            setCierreId(elegido)
+                            setTab('apuntes')
+                            setNotas((prev) => ['Extracto asignado. Los apuntes están en Apuntes para puntearlos.', ...prev])
+                            await cargar()
+                          })
+                          .catch((err) => fallar(err, 'No he podido asignar la cuenta'))
+                      }}
+                    >
+                      Confirmar cuenta
+                    </button>
+                    <button type="button" className="sec" onClick={() => setAsignar(null)}>Cancelar</button>
+                  </>
                 )}
                 <button
                   type="button"
@@ -224,6 +246,13 @@ export function App() {
           ))}
         </div>
       )}
+
+      {resumen && cierreId && (() => {
+        const cuenta = resumen.cuentas.find((c) => c.id === cierreId.cuentaId)
+        const archivo = resumen.archivos.find((a) => a.id === cierreId.archivoId)
+        if (!cuenta || !archivo) return null
+        return <Cierre cuenta={cuenta} archivo={archivo} onClose={() => setCierreId(null)} />
+      })()}
 
       <nav className="tabs">
         <button type="button" className={tab === 'apuntes' ? 'on' : ''} onClick={() => setTab('apuntes')}>
